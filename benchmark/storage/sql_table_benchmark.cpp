@@ -74,6 +74,31 @@ class SqlTableBenchmark : public benchmark::Fixture {
     reads_.clear();
   }
 
+  // Add a column of type integer to the given schema
+  catalog::Schema AddColumn(catalog::Schema &schema, catalog::col_oid_t &oid) {
+    std::vector<catalog::Schema::Column> columns = schema.GetColumns();
+    columns.emplace_back("", type::TypeId::BIGINT, false, oid++);
+    return catalog::Schema(columns, schema.GetVersion() + 1);
+  }
+
+  catalog::Schema DropColumn(catalog::Schema &schema) {
+    std::vector<catalog::Schema::Column> columns = schema.GetColumns();
+    // If there is only one column, we don't drop it
+    if (columns.size() == 1) return catalog::Schema(columns, schema.GetVersion() + 1);
+    // randomly remove an element
+    std::uniform_int_distribution<> dist(0, static_cast<int>(columns.size() - 1));
+    columns.erase(columns.begin() + dist(generator_));
+    return catalog::Schema(columns, schema.GetVersion() + 1);
+  }
+
+  catalog::Schema ChangeSchema(catalog::Schema &schema, catalog::col_oid_t &oid) {
+    std::bernoulli_distribution d(0.5);
+    if (d(generator_)) {
+      return AddColumn(schema, oid);
+    } else {
+      return DropColumn(schema);
+    }
+  }
   // Sql Table
   storage::SqlTable *table_ = nullptr;
 
@@ -686,6 +711,15 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   delete[] init_buffer;
   delete init_txn;
   LOG_INFO("FINISHED");
+
+  // pre-generate new schemas
+  std::vector<catalog::Schema> new_schemas;
+  new_schemas.emplace_back(*schema_);
+  catalog::col_oid_t change_start_oid(1000);
+  for (uint32_t i = 0; i < num_txns_; i++) {
+    new_schemas.emplace_back(ChangeSchema(new_schemas[i], change_start_oid));
+  }
+
   // create 4 workloads
 
   // Insert workload
@@ -699,7 +733,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     byte *version_ptr = version_row->AccessWithNullCheck(init_pair.second.at(catalog::col_oid_t(101)));
 
     storage::layout_version_t my_version(*reinterpret_cast<uint32_t *>(version_ptr));
-    // LOG_INFO("before insert ...");
+
+    // Create a redo buffer
     table_->Insert(txn, *redo_, my_version);
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
     // LOG_INFO("{}", inserted++);
