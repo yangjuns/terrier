@@ -76,12 +76,12 @@ class Schema {
     col_oid_t GetOid() const { return oid_; }
 
    private:
-    const std::string name_;
-    const type::TypeId type_;
+    std::string name_;
+    type::TypeId type_;
     uint8_t attr_size_;
-    const bool nullable_;
+    bool nullable_;
     bool inlined_;
-    const col_oid_t oid_;
+    col_oid_t oid_;
     // TODO(Matt): default value would go here
     // Value default_;
   };
