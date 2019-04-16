@@ -12,6 +12,7 @@
 #include "transaction/transaction_manager.h"
 #include "util/catalog_test_util.h"
 #include "util/multithread_test_util.h"
+#include "util/random_test_util.h"
 #include "util/storage_test_util.h"
 #include "util/transaction_test_util.h"
 namespace terrier {
@@ -81,7 +82,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   const storage::ProjectionMap *map_;
 
   // Workload
-  const uint32_t num_inserts_ = 10000000;
+  const uint32_t num_txns_ = 1000;
+  const uint32_t num_inserts_ = 1000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
   const uint32_t num_threads_ = 4;
@@ -91,7 +93,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   // Test infrastructure
   std::default_random_engine generator_;
   storage::BlockStore block_store_{1000, 1000};
-  storage::RecordBufferSegmentPool buffer_pool_{num_inserts_, buffer_pool_reuse_limit_};
+  storage::RecordBufferSegmentPool buffer_pool_{10000000, buffer_pool_reuse_limit_};
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Schema
@@ -643,34 +645,145 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
   state.SetItemsProcessed(state.iterations() * num_inserts_);
 }
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
+  // Populate table_ by inserting tuples
+  auto init_txn = txn_manager_.BeginTransaction();
+  std::vector<storage::TupleSlot> slots;
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
+  }
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+  delete init_txn;
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
+  // create a table acting like catalog
+  LOG_INFO("Creating version table ...")
+  catalog::col_oid_t col_oid(100);
+  std::vector<catalog::Schema::Column> columns;
+  columns.emplace_back("table_oid", type::TypeId::INTEGER, false, col_oid++);
+  columns.emplace_back("version", type::TypeId::INTEGER, false, col_oid++);
+  catalog::Schema version_schema(columns, storage::layout_version_t(0));
+  storage::SqlTable version_table(&block_store_, version_schema, catalog::table_oid_t(1));
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
+  // insert (0, 0) into version_table
+  LOG_INFO("Inserting (0,0) into version table ...")
+  std::vector<catalog::col_oid_t> all_oids;
+  for (auto &c : columns) {
+    all_oids.emplace_back(c.GetOid());
+  }
+  auto init_pair = version_table.InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+  byte *init_buffer = common::AllocationUtil::AllocateAligned(init_pair.first.ProjectedRowSize());
+  storage::ProjectedRow *init_row = init_pair.first.InitializeRow(init_buffer);
+  byte *table_oid_ptr = init_row->AccessForceNotNull(init_pair.second.at(catalog::col_oid_t(100)));
+  byte *version_ptr = init_row->AccessForceNotNull(init_pair.second.at(catalog::col_oid_t(101)));
+  LOG_INFO("Assigning values ...")
+  EXPECT_NE(table_oid_ptr, nullptr);
+  *reinterpret_cast<uint32_t *>(table_oid_ptr) = 0;
+  *reinterpret_cast<uint32_t *>(version_ptr) = 0;
+  init_txn = txn_manager_.BeginTransaction();
+  storage::TupleSlot init_slot = version_table.Insert(init_txn, *init_row, storage::layout_version_t(0));
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+  delete[] init_buffer;
+  delete init_txn;
+  LOG_INFO("FINISHED");
+  // create 4 workloads
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+  // Insert workload
+  auto insert = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    // need to know which version is it
+    // TODO(yangjuns): we can avoid allocating space for your version potentially
+    byte *version_buffer = common::AllocationUtil::AllocateAligned(init_pair.first.ProjectedRowSize());
+    storage::ProjectedRow *version_row = init_pair.first.InitializeRow(version_buffer);
+    version_table.Select(txn, init_slot, version_row, init_pair.second, storage::layout_version_t(0));
+    byte *version_ptr = version_row->AccessWithNullCheck(init_pair.second.at(catalog::col_oid_t(101)));
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+    storage::layout_version_t my_version(*reinterpret_cast<uint32_t *>(version_ptr));
+    // LOG_INFO("before insert ...");
+    table_->Insert(txn, *redo_, my_version);
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    // LOG_INFO("{}", inserted++);
+    delete[] version_buffer;
+    delete txn;
+  };
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
+  // Read Workload
+  auto read = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    // need to know which version is it
+    // TODO(yangjuns): we can avoid allocating space for your version potentially
+    byte *version_buffer = common::AllocationUtil::AllocateAligned(init_pair.first.ProjectedRowSize());
+    storage::ProjectedRow *version_row = init_pair.first.InitializeRow(version_buffer);
+    version_table.Select(txn, init_slot, version_row, init_pair.second, storage::layout_version_t(0));
+    byte *version_ptr = version_row->AccessForceNotNull(init_pair.second.at(catalog::col_oid_t(101)));
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+    storage::layout_version_t my_version(*reinterpret_cast<uint32_t *>(version_ptr));
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
+    // Create a projected row buffer to readS
+    // [0, hot_spot_range) is the hot spot area.
+    // TODO(yangjuns): this hotspot index can be pre-generated
+    double hot_spot_prob = 0.8;
+    uint32_t hot_spot_range = static_cast<uint32_t>(num_inserts_ * 0.2);
+    uint32_t index = 0;
+    std::uniform_real_distribution<> real_dist(0, 1);
+    if (real_dist(generator_) < hot_spot_prob) {
+      std::uniform_int_distribution<> int_dist(0, hot_spot_range - 1);
+      index = int_dist(generator_);
+    } else {
+      std::uniform_int_distribution<> int_dist(hot_spot_range, num_inserts_ - 1);
+      index = int_dist(generator_);
+    }
+    table_->Select(txn, slots[index], reads_[id], *map_, my_version);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentSingleVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    delete[] version_buffer;
+    delete txn;
+  };
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentMultiVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    auto workload = [&](uint32_t id) {
+      for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
+        RandomTestUtil::InvokeWorkloadWithDistribution({read, insert}, {id, id}, {0.5, 0.5}, &generator_);
+      }
+    };
+    common::WorkerPool thread_pool(num_threads_, {});
+    MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+  }
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
+  state.SetItemsProcessed(state.iterations() * num_txns_);
+}
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentSingleVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentMultiVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
