@@ -762,7 +762,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     byte *version_ptr = version_row->AccessForceNotNull(init_pair.second.at(catalog::col_oid_t(101)));
 
     storage::layout_version_t my_version(*reinterpret_cast<uint32_t *>(version_ptr));
-
+    delete[] version_buffer;
     // Create a projected row buffer to readS
     // [0, hot_spot_range) is the hot spot area.
     // TODO(yangjuns): this hotspot index can be pre-generated
@@ -777,10 +777,22 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       std::uniform_int_distribution<> int_dist(hot_spot_range, num_inserts_ - 1);
       index = int_dist(generator_);
     }
-    table_->Select(txn, slots[index], reads_[id], *map_, my_version);
 
+    // create read buffer
+    std::vector<catalog::col_oid_t> all_oids;
+    for (auto &c : new_schemas[!my_version].GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+    byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
+
+    // Select
+    table_->Select(txn, slots[index], read, pair.second, my_version);
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-    delete[] version_buffer;
+
+    // free memory
+    delete[] read_buffer;
     delete txn;
   };
 
