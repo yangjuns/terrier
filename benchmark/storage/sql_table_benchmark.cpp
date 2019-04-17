@@ -731,14 +731,23 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     storage::ProjectedRow *version_row = init_pair.first.InitializeRow(version_buffer);
     version_table.Select(txn, init_slot, version_row, init_pair.second, storage::layout_version_t(0));
     byte *version_ptr = version_row->AccessWithNullCheck(init_pair.second.at(catalog::col_oid_t(101)));
-
     storage::layout_version_t my_version(*reinterpret_cast<uint32_t *>(version_ptr));
+    delete[] version_buffer;
 
     // Create a redo buffer
-    table_->Insert(txn, *redo_, my_version);
+    std::vector<catalog::col_oid_t> all_oids;
+    for (auto &c : new_schemas[!my_version].GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+    byte *redo_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *redo = pair.first.InitializeRow(redo_buffer);
+    CatalogTestUtil::PopulateRandomRow(redo, new_schemas[!my_version], pair.second, &generator_);
+
+    // Insert the tuple
+    table_->Insert(txn, *redo, my_version);
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-    // LOG_INFO("{}", inserted++);
-    delete[] version_buffer;
+    delete[] redo_buffer;
     delete txn;
   };
 
