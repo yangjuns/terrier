@@ -140,8 +140,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
     *reinterpret_cast<uint32_t *>(version_ptr) = 0;
 
     auto init_txn = txn_manager_.BeginTransaction();
-    printf("------ begin version insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
-           !init_txn->TxnId().load(), init_txn);
+    //    printf("------ begin version insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
+    //           !init_txn->TxnId().load(), init_txn);
     version_slot_ = version_table_->Insert(init_txn, *init_row, storage::layout_version_t(0));
     txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
     delete[] init_buffer;
