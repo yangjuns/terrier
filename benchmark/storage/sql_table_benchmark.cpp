@@ -3,6 +3,7 @@
 #include <vector>
 #include "benchmark/benchmark.h"
 #include "common/macros.h"
+#include "common/scoped_timer.h"
 #include "common/spin_latch.h"
 #include "common/strong_typedef.h"
 #include "loggers/main_logger.h"
@@ -448,7 +449,12 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       }
     };
     common::WorkerPool thread_pool(num_threads_, {});
-    MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+    uint64_t elapsed_ms;
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
   }
   // sum of commited
