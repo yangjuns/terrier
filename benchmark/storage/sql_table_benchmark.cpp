@@ -2,6 +2,7 @@
 #include <utility>
 #include <vector>
 #include "benchmark/benchmark.h"
+#include "common/macros.h"
 #include "common/spin_latch.h"
 #include "common/strong_typedef.h"
 #include "loggers/main_logger.h"
@@ -169,6 +170,23 @@ class SqlTableBenchmark : public benchmark::Fixture {
     delete[] version_buffer;
     return my_version;
   }
+
+  bool UpdateVersionTable(transaction::TransactionContext *txn, storage::layout_version_t new_ver) {
+    // TODO(yangjuns): can speed up
+    // create update redo
+    std::vector<catalog::col_oid_t> cols;
+    // update the version column
+    cols.emplace_back(version_schema_->GetColumn(1).GetOid());
+    auto pair = version_table_->InitializerForProjectedRow(cols, storage::layout_version_t(0));
+    byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
+    uint32_t *version = reinterpret_cast<uint32_t *>(update_row->AccessForceNotNull(pair.second.at(cols[0])));
+    *version = !new_ver;
+    auto result = version_table_->Update(txn, version_slot_, *update_row, pair.second, storage::layout_version_t(0));
+    delete[] update_buffer;
+    return result.first;
+  }
+
   /**
    * Return the index of the slots
    * @param slots
@@ -193,7 +211,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   // slots lock
   common::SpinLatch slot_latch_;
-
+  common::SpinLatch schema_latch_;
   // Sql Table
   storage::SqlTable *table_ = nullptr;
   storage::SqlTable *version_table_ = nullptr;
@@ -219,8 +237,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   std::vector<std::vector<transaction::TransactionContext *>> finished_txns_;
   // Test infrastructure
   std::default_random_engine generator_;
-  storage::BlockStore sql_block_store_{1000, 1000};
-  storage::BlockStore version_block_store_{1000, 1000};
+  storage::BlockStore sql_block_store_{1000000, 1000};
+  storage::BlockStore version_block_store_{1000000, 1000};
   storage::RecordBufferSegmentPool buffer_pool_{10000000, buffer_pool_reuse_limit_};
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, false, LOGGING_DISABLED};
 
@@ -264,9 +282,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   std::vector<catalog::Schema> new_schemas;
   new_schemas.emplace_back(*schema_);
   catalog::col_oid_t change_start_oid(1000);
-  for (uint32_t i = 0; i < num_txns_; i++) {
-    new_schemas.emplace_back(ChangeSchema(new_schemas[i], &change_start_oid));
-  }
   LOG_INFO("Finished schema size {}", new_schemas.size());
   // create 4 workloads
 
@@ -277,17 +292,24 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
 
     // Create a redo buffer
     std::vector<catalog::col_oid_t> all_oids;
-    for (auto &c : new_schemas[!my_version].GetColumns()) {
+    catalog::Schema *my_schema = nullptr;
+
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[!my_version]);
+    }
+    for (auto &c : my_schema->GetColumns()) {
       all_oids.emplace_back(c.GetOid());
     }
     auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
     byte *redo_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
     storage::ProjectedRow *redo = pair.first.InitializeRow(redo_buffer);
-    CatalogTestUtil::PopulateRandomRow(redo, new_schemas[!my_version], pair.second, &generator_);
+    CatalogTestUtil::PopulateRandomRow(redo, *my_schema, pair.second, &generator_);
 
     // Insert the tuple
     table_->Insert(txn, *redo, my_version);
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    delete my_schema;
     delete[] redo_buffer;
     finished_txns_[id].emplace_back(txn);
   };
@@ -299,10 +321,15 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
 
     // Create a projected row buffer to reads
     // create read buffer
+    // printf("reading version %d\n", !my_version);
     std::vector<catalog::col_oid_t> all_oids;
-    for (auto &c : new_schemas[!my_version].GetColumns()) {
-      all_oids.emplace_back(c.GetOid());
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      for (auto &c : new_schemas[!my_version].GetColumns()) {
+        all_oids.emplace_back(c.GetOid());
+      }
     }
+
     auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
     byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
     storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
@@ -326,16 +353,21 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     auto txn = txn_manager_.BeginTransaction();
     storage::layout_version_t my_version = GetVersion(txn, id);
 
+    catalog::Schema *my_schema = nullptr;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[!my_version]);
+    }
     // Create a redo buffer
     std::vector<catalog::col_oid_t> all_oids;
-    for (auto &c : new_schemas[!my_version].GetColumns()) {
+    for (auto &c : my_schema->GetColumns()) {
       all_oids.emplace_back(c.GetOid());
     }
     auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
     byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
     storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
 
-    CatalogTestUtil::PopulateRandomRow(update_row, new_schemas[!my_version], pair.second, &generator_);
+    CatalogTestUtil::PopulateRandomRow(update_row, *my_schema, pair.second, &generator_);
 
     // Update the tuple
     auto slot_pair = GetHotSpotSlot(slots);
@@ -347,6 +379,34 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       txn_manager_.Abort(txn);
     }
     delete[] update_buffer;
+    delete my_schema;
+    finished_txns_[id].emplace_back(txn);
+  };
+
+  auto schema_change = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    storage::layout_version_t my_version = GetVersion(txn, id);
+
+    // update the version table
+    bool succ = UpdateVersionTable(txn, my_version + 1);
+    if (succ) {
+      // Create a schema to update
+      // there will be only one thread reaching here.
+      {
+        common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+        new_schemas.emplace_back(ChangeSchema(*(new_schemas.end() - 1), &change_start_oid));
+      }
+
+      // update schema
+      TERRIER_ASSERT((!(new_schemas[!my_version + 1].GetVersion())) == (!my_version + 1),
+                     "the version of the schema should by 1 bigger");
+      table_->UpdateSchema(*(new_schemas.end() - 1));
+
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    } else {
+      // someone else is updating the schema, abort
+      txn_manager_.Abort(txn);
+    }
     finished_txns_[id].emplace_back(txn);
   };
 
@@ -354,8 +414,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   for (auto _ : state) {
     auto workload = [&](uint32_t id) {
       for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
-        RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update}, {id, id, id}, {0.7, 0.15, 0.1},
-                                                       &generator_);
+        RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update, schema_change}, {id, id, id, id},
+                                                       {0.7, 0.15, 0.1, 0.05}, &generator_);
       }
     };
     common::WorkerPool thread_pool(num_threads_, {});
@@ -365,6 +425,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   state.SetItemsProcessed(state.iterations() * num_txns_);
 }
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Repetitions(1);
 
 }  // namespace terrier
