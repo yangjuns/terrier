@@ -7,6 +7,7 @@
 #include "common/strong_typedef.h"
 #include "loggers/main_logger.h"
 #include "storage/data_table.h"
+#include "storage/garbage_collector.h"
 #include "storage/sql_table.h"
 #include "storage/storage_defs.h"
 #include "storage/storage_util.h"
@@ -28,8 +29,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
  public:
   void SetUp(const benchmark::State &state) final {
     common::WorkerPool thread_pool(num_threads_, {});
-
-    finished_txns_.resize(num_threads_);
 
     // create schema
     catalog::col_oid_t col_oid(0);
@@ -81,11 +80,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
     columns_.clear();
     read_buffers_.clear();
     reads_.clear();
-    for (auto &txns : finished_txns_) {
-      LOG_INFO("# of txn {}", txns.size());
-      for (auto &t : txns) delete t;
-    }
-    finished_txns_.clear();
   }
 
   // Add a column of type integer to the given schema
@@ -146,7 +140,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
     version_slot_ = version_table_->Insert(init_txn, *init_row, storage::layout_version_t(0));
     txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
     delete[] init_buffer;
-    delete init_txn;
     LOG_INFO("FINISHED");
   }
 
@@ -209,6 +202,21 @@ class SqlTableBenchmark : public benchmark::Fixture {
     return {index, slots[index]};
   }
 
+  void StartGC(transaction::TransactionManager *const txn_manager) {
+    gc_ = new storage::GarbageCollector(txn_manager);
+    run_gc_ = true;
+    gc_thread_ = std::thread([this] { GCThreadLoop(); });
+  }
+
+  void EndGC() {
+    run_gc_ = false;
+    gc_thread_.join();
+    // Make sure all garbage is collected. This take 2 runs for unlink and deallocate
+    gc_->PerformGarbageCollection();
+    gc_->PerformGarbageCollection();
+    delete gc_;
+  }
+
   // slots lock
   common::SpinLatch slot_latch_;
   common::SpinLatch schema_latch_;
@@ -234,13 +242,12 @@ class SqlTableBenchmark : public benchmark::Fixture {
   const uint64_t buffer_pool_reuse_limit_ = 10000000;
   const uint32_t scan_buffer_size_ = 1000;  // maximum number of tuples in a buffer
 
-  std::vector<std::vector<transaction::TransactionContext *>> finished_txns_;
   // Test infrastructure
   std::default_random_engine generator_;
   storage::BlockStore sql_block_store_{1000000, 1000};
   storage::BlockStore version_block_store_{1000000, 1000};
   storage::RecordBufferSegmentPool buffer_pool_{10000000, buffer_pool_reuse_limit_};
-  transaction::TransactionManager txn_manager_ = {&buffer_pool_, false, LOGGING_DISABLED};
+  transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Schema
   const uint32_t column_num_ = 2;
@@ -259,12 +266,26 @@ class SqlTableBenchmark : public benchmark::Fixture {
   // Read buffers pointers for concurrent reads
   std::vector<byte *> read_buffers_;
   std::vector<storage::ProjectedRow *> reads_;
+
+  // GC
+  std::thread gc_thread_;
+  storage::GarbageCollector *gc_ = nullptr;
+  volatile bool run_gc_ = false;
+  const std::chrono::milliseconds gc_period_{10};
+
+  void GCThreadLoop() {
+    while (run_gc_) {
+      std::this_thread::sleep_for(gc_period_);
+      gc_->PerformGarbageCollection();
+    }
+  }
 };
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
   // Populate table_ by inserting tuples
   LOG_INFO("inserting tuples ...");
+
   auto init_txn = txn_manager_.BeginTransaction();
   //  printf("------ begin insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
   //         !init_txn->TxnId().load(), init_txn);
@@ -274,8 +295,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
   }
   txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
-  // putting it to the first queue to be cleaned at the end;
-  finished_txns_[0].emplace_back(init_txn);
 
   // pre-generate new schemas
   LOG_INFO("Pregenerating schemas ...");
@@ -311,7 +330,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
     delete my_schema;
     delete[] redo_buffer;
-    finished_txns_[id].emplace_back(txn);
   };
 
   // Read Workload
@@ -345,7 +363,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
 
     // free memory
     delete[] read_buffer;
-    finished_txns_[id].emplace_back(txn);
   };
 
   // Update workload
@@ -380,7 +397,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     }
     delete[] update_buffer;
     delete my_schema;
-    finished_txns_[id].emplace_back(txn);
   };
 
   auto schema_change = [&](uint32_t id) {
@@ -407,11 +423,11 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       // someone else is updating the schema, abort
       txn_manager_.Abort(txn);
     }
-    finished_txns_[id].emplace_back(txn);
   };
 
   // NOLINTNEXTLINE
   for (auto _ : state) {
+    StartGC(&txn_manager_);
     auto workload = [&](uint32_t id) {
       for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
         RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update, schema_change}, {id, id, id, id},
@@ -420,6 +436,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     };
     common::WorkerPool thread_pool(num_threads_, {});
     MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+    EndGC();
   }
 
   state.SetItemsProcessed(state.iterations() * num_txns_);
