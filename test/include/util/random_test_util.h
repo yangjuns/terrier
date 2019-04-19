@@ -78,13 +78,17 @@ class RandomTestUtil {
    * @param repeat the number of times this should be done.
    */
   template <typename Random>
-  static void InvokeWorkloadWithDistribution(std::vector<std::function<void(uint32_t)>> workloads,
-                                             std::vector<uint32_t> ids, std::vector<double> probabilities,
-                                             Random *generator, uint32_t repeat = 1) {
+  static uint32_t InvokeWorkloadWithDistribution(std::vector<std::function<bool(uint32_t)>> workloads,
+                                                 std::vector<uint32_t> ids, std::vector<double> probabilities,
+                                                 Random *generator, uint32_t repeat = 1) {
     TERRIER_ASSERT(probabilities.size() == workloads.size(), "Probabilities and workloads must have the same size.");
     std::discrete_distribution dist(probabilities.begin(), probabilities.end());
     uint32_t index = dist(*generator);
-    for (uint32_t i = 0; i < repeat; i++) workloads[index](ids[index]);
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < repeat; i++) {
+      if (workloads[index](ids[index])) count++;
+    }
+    return count;
   }
 };
 

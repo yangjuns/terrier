@@ -29,7 +29,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
  public:
   void SetUp(const benchmark::State &state) final {
     common::WorkerPool thread_pool(num_threads_, {});
-
+    commited_txns_.resize(num_threads_);
     // create schema
     catalog::col_oid_t col_oid(0);
     for (uint32_t i = 0; i < column_num_; i++) {
@@ -242,6 +242,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   const uint64_t buffer_pool_reuse_limit_ = 10000000;
   const uint32_t scan_buffer_size_ = 1000;  // maximum number of tuples in a buffer
 
+  // Count
+  std::vector<uint32_t> commited_txns_;
   // Test infrastructure
   std::default_random_engine generator_;
   storage::BlockStore sql_block_store_{1000000, 1000};
@@ -330,13 +332,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
     delete my_schema;
     delete[] redo_buffer;
+    return true;
   };
 
   // Read Workload
   auto read = [&](uint32_t id) {
     auto txn = txn_manager_.BeginTransaction();
     storage::layout_version_t my_version = GetVersion(txn, id);
-
+    bool aborted = false;
     // Create a projected row buffer to reads
     // create read buffer
     // printf("reading version %d\n", !my_version);
@@ -357,19 +360,22 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
     if (succ) {
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
     } else {
       txn_manager_.Abort(txn);
+      aborted = true;
     }
 
     // free memory
     delete[] read_buffer;
+    return aborted;
   };
 
   // Update workload
   auto update = [&](uint32_t id) {
     auto txn = txn_manager_.BeginTransaction();
     storage::layout_version_t my_version = GetVersion(txn, id);
-
+    bool aborted;
     catalog::Schema *my_schema = nullptr;
     {
       common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
@@ -391,18 +397,21 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     auto update_pair = table_->Update(txn, slot_pair.second, *update_row, pair.second, my_version);
     if (update_pair.first) {
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
     } else {
       // write-write conflict
       txn_manager_.Abort(txn);
+      aborted = true;
     }
     delete[] update_buffer;
     delete my_schema;
+    return aborted;
   };
 
   auto schema_change = [&](uint32_t id) {
     auto txn = txn_manager_.BeginTransaction();
     storage::layout_version_t my_version = GetVersion(txn, id);
-
+    bool aborted = false;
     // update the version table
     bool succ = UpdateVersionTable(txn, my_version + 1);
     if (succ) {
@@ -419,10 +428,13 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       table_->UpdateSchema(*(new_schemas.end() - 1));
 
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
     } else {
       // someone else is updating the schema, abort
       txn_manager_.Abort(txn);
+      aborted = true;
     }
+    return aborted;
   };
 
   // NOLINTNEXTLINE
@@ -430,16 +442,21 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     StartGC(&txn_manager_);
     auto workload = [&](uint32_t id) {
       for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
-        RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update, schema_change}, {id, id, id, id},
-                                                       {0.7, 0.15, 0.1, 0.05}, &generator_);
+        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution(
+            {read, insert, update, schema_change}, {id, id, id, id}, {0.7, 0.15, 0.1, 0.05}, &generator_);
+        commited_txns_[id] += commited;
       }
     };
     common::WorkerPool thread_pool(num_threads_, {});
     MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
     EndGC();
   }
-
-  state.SetItemsProcessed(state.iterations() * num_txns_);
+  // sum of commited
+  uint32_t sum = 0;
+  for (auto c : commited_txns_) {
+    sum += c;
+  }
+  state.SetItemsProcessed(sum);
 }
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Repetitions(1);
