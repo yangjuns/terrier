@@ -174,7 +174,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
     auto pair = version_table_->InitializerForProjectedRow(cols, storage::layout_version_t(0));
     byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
     storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
-    uint32_t *version = reinterpret_cast<uint32_t *>(update_row->AccessForceNotNull(pair.second.at(cols[0])));
+    auto *version = reinterpret_cast<uint32_t *>(update_row->AccessForceNotNull(pair.second.at(cols[0])));
     *version = !new_ver;
     auto result = version_table_->Update(txn, version_slot_, *update_row, pair.second, storage::layout_version_t(0));
     delete[] update_buffer;
