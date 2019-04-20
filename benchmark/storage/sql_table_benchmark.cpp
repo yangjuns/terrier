@@ -235,8 +235,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   storage::TupleSlot version_slot_;
 
   // Workload
-  const uint32_t num_txns_ = 1000;
-  const uint32_t num_inserts_ = 1000;
+  const uint32_t num_txns_ = 100000;
+  const uint32_t num_inserts_ = 10000000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
   const uint32_t num_threads_ = 4;
