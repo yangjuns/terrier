@@ -252,18 +252,18 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, Update)(benchmark::State &state) {
   state.SetItemsProcessed(state.iterations() * num_updates_);
 }
 
-// BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 
-// BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialRead)->Unit(benchmark::kMillisecond);
-//
-// BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialRead)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentRandomRead)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond);
 
-// BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
