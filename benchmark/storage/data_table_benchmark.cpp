@@ -2,6 +2,7 @@
 #include <vector>
 
 #include "benchmark/benchmark.h"
+#include "common/scoped_timer.h"
 #include "common/strong_typedef.h"
 #include "storage/data_table.h"
 #include "storage/storage_util.h"
@@ -60,6 +61,7 @@ class DataTableBenchmark : public benchmark::Fixture {
   const uint32_t num_inserts_ = 10000000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
+  const uint32_t num_deletes_ = 10000000;
   const uint32_t num_threads_ = 4;
   const uint64_t buffer_pool_reuse_limit_ = 10000000;
 
@@ -142,20 +144,26 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialRead)(benchmark::State &state) 
 // Insert num_inserts_ tuples and delete them in sequential order
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialDelete)(benchmark::State &state) {
-  storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
   // Populate read_table by inserting tuples
   // We can use dummy timestamps here since we're not invoking concurrency control
   transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
                                       LOGGING_DISABLED);
-  std::vector<storage::TupleSlot> delete_order;
-  for (uint32_t i = 0; i < num_reads_; ++i) {
-    delete_order.emplace_back(table.Insert(&txn, *redo_));
-  }
+
   // NOLINTNEXTLINE
   for (auto _ : state) {
-    for (uint32_t i = 0; i < num_reads_; ++i) {
-      table.Delete(&txn, delete_order[i]);
+    storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
+    std::vector<storage::TupleSlot> delete_order;
+    for (uint32_t i = 0; i < num_deletes_; ++i) {
+      delete_order.emplace_back(table.Insert(&txn, *redo_));
     }
+    uint64_t elapsed_ms;
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      for (uint32_t i = 0; i < num_deletes_; ++i) {
+        table.Delete(&txn, delete_order[i]);
+      }
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
   }
 
   state.SetItemsProcessed(state.iterations() * num_reads_);
@@ -244,18 +252,18 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, Update)(benchmark::State &state) {
   state.SetItemsProcessed(state.iterations() * num_updates_);
 }
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentRandomRead)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
