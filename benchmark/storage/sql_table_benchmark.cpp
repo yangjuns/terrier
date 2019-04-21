@@ -237,6 +237,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   // Workload
   const uint32_t num_txns_ = 100000;
   const uint32_t num_inserts_ = 10000000;
+  const uint32_t num_deletes_ = 10000000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
   const uint32_t num_threads_ = 4;
@@ -527,6 +528,34 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, SingleVersionSequentialRead)(benchmark::St
   }
 
   state.SetItemsProcessed(state.iterations() * num_inserts_);
+}
+
+// Read the num_reads_ of tuples in a sequential order from a SqlTable in a single thread
+// The SqlTable has only one schema version
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, SingleVersionSequentialDelete)(benchmark::State &state) {
+  // Populate read_table_ by inserting tuples
+  // We can use dummy timestamps here since we're not invoking concurrency control
+  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                      LOGGING_DISABLED);
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    std::vector<storage::TupleSlot> delete_order;
+    for (uint32_t i = 0; i < num_deletes_; ++i) {
+      delete_order.emplace_back(table_->Insert(&txn, *redo_, storage::layout_version_t(0)));
+    }
+    uint64_t elapsed_ms;
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      for (uint32_t i = 0; i < num_deletes_; ++i) {
+        table_->Delete(&txn, delete_order[i], storage::layout_version_t(0));
+      }
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+  }
+
+  state.SetItemsProcessed(state.iterations() * num_deletes_);
 }
 
 // Read the num_reads_ of tuples in a sequential order from a SqlTable in a single thread
@@ -998,34 +1027,36 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentSingleVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentMultiVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentSingleVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentMultiVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Repetitions(1);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Repetitions(1);
 
 }  // namespace terrier
