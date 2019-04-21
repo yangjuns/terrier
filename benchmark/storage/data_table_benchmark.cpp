@@ -139,6 +139,28 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialRead)(benchmark::State &state) 
   state.SetItemsProcessed(state.iterations() * num_reads_);
 }
 
+// Insert num_inserts_ tuples and delete them in sequential order
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialDelete)(benchmark::State &state) {
+  storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
+  // Populate read_table by inserting tuples
+  // We can use dummy timestamps here since we're not invoking concurrency control
+  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                      LOGGING_DISABLED);
+  std::vector<storage::TupleSlot> delete_order;
+  for (uint32_t i = 0; i < num_reads_; ++i) {
+    delete_order.emplace_back(table.Insert(&txn, *redo_));
+  }
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    for (uint32_t i = 0; i < num_reads_; ++i) {
+      table.Delete(&txn, delete_order[i]);
+    }
+  }
+
+  state.SetItemsProcessed(state.iterations() * num_reads_);
+}
+
 // Read the num_reads_ of tuples in a random order from a DataTable in a single thread
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(DataTableBenchmark, RandomRead)(benchmark::State &state) {
@@ -224,13 +246,15 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, Update)(benchmark::State &state) {
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
+// BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialRead)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentRandomRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+// BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentRandomRead)->Unit(benchmark::kMillisecond)->UseRealTime();
+
+BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
 
