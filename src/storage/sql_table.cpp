@@ -118,6 +118,9 @@ void SqlTable::UpdateSchema(const catalog::Schema &schema) {
   // as a potential leak and throws an error incorrectly.
   // NOLINTNEXTLINE
   tables_.Insert(schema.GetVersion(), {dt, layout, col_map, inv_col_map});
+  if (first_dt_ == nullptr) {
+    first_dt_ = dt;
+  }
 }
 
 bool SqlTable::Select(transaction::TransactionContext *const txn, const TupleSlot slot, ProjectedRow *const out_buffer,
@@ -129,7 +132,10 @@ bool SqlTable::Select(transaction::TransactionContext *const txn, const TupleSlo
   TERRIER_ASSERT(out_buffer->NumColumns() <= tables_.Find(version_num)->second.column_map.size(),
                  "The output buffer never returns the version pointer columns, so it should have "
                  "fewer attributes.");
-
+  // For common case
+  if (!version_num == 0) {
+    return first_dt_->Select(txn, slot, out_buffer);
+  }
   // The version of the current slot is the same as the version num
   if (old_version_num == version_num) {
     return tables_.Find(version_num)->second.data_table->Select(txn, slot, out_buffer);

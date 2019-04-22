@@ -315,6 +315,8 @@ class SqlTable {
   }
 
  private:
+  // cache for common case (no schema change)
+  DataTable *first_dt_ = nullptr;
   BlockStore *const block_store_;
   const catalog::table_oid_t oid_;
 
