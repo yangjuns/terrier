@@ -436,6 +436,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     return aborted;
   };
 
+  uint64_t elapsed_ms = 0;
   // NOLINTNEXTLINE
   for (auto _ : state) {
     StartGC(&txn_manager_);
@@ -447,7 +448,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
       }
     };
     common::WorkerPool thread_pool(num_threads_, {});
-    uint64_t elapsed_ms;
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
@@ -460,6 +460,9 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   for (auto c : commited_txns_) {
     sum += c;
   }
+  // TODO(yangjuns): Compute throughput by ourselves. The google benchmark number doesn't make sense.
+  LOG_INFO("sum {}, elapsed_time: {}, throughput: {}", sum, static_cast<double>(elapsed_ms) / 1000,
+           sum / (static_cast<double>(elapsed_ms) / 1000));
   state.SetItemsProcessed(sum);
 }
 
@@ -1113,31 +1116,33 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
-
-// Benchmarks for version match
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
-
-// Benchmarks for version mismatch
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
-
-//// Benchmark for concurrent workload
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Repetitions(1);
 //
+//// Benchmarks for version match
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+//
+//// Benchmarks for version mismatch
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
+
+// Benchmark for concurrent workload
+// Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't have
+// compaction so it will blow up memory
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Iterations(4);
+
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentSingleVersionRead)->Unit(benchmark::kMillisecond)->UseRealTime();
