@@ -191,7 +191,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
    * @return
    */
   std::pair<uint32_t, storage::TupleSlot> GetHotSpotSlot(const std::vector<storage::TupleSlot> &slots) {
-    common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
     // TODO(yangjuns): this hotspot index can be pre-generated
     double hot_spot_prob = 0.8;
     auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * 0.2);
@@ -222,8 +221,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
     delete gc_;
   }
 
-  // slots lock
-  common::SpinLatch slot_latch_;
+  // schema_latch_
   common::SpinLatch schema_latch_;
 
   // Sql Table
