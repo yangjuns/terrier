@@ -121,21 +121,22 @@ void SqlTable::UpdateSchema(const catalog::Schema &schema) {
   if (first_dt_ == nullptr) {
     first_dt_ = dt;
   }
-}
+}  // NOLINT
 
 bool SqlTable::Select(transaction::TransactionContext *const txn, const TupleSlot slot, ProjectedRow *const out_buffer,
                       const ProjectionMap &pr_map, layout_version_t version_num) const {
   STORAGE_LOG_DEBUG("slot version: {}, current version: {}", !slot.GetBlock()->layout_version_, !version_num);
+
+  // For common case
+  if (!version_num == 0) {
+    return first_dt_->Select(txn, slot, out_buffer);
+  }
 
   layout_version_t old_version_num = slot.GetBlock()->layout_version_;
 
   TERRIER_ASSERT(out_buffer->NumColumns() <= tables_.Find(version_num)->second.column_map.size(),
                  "The output buffer never returns the version pointer columns, so it should have "
                  "fewer attributes.");
-  // For common case
-  if (!version_num == 0) {
-    return first_dt_->Select(txn, slot, out_buffer);
-  }
   // The version of the current slot is the same as the version num
   if (old_version_num == version_num) {
     return tables_.Find(version_num)->second.data_table->Select(txn, slot, out_buffer);
@@ -173,12 +174,13 @@ std::pair<bool, storage::TupleSlot> SqlTable::Update(transaction::TransactionCon
   // TODO(Matt): update indexes
   STORAGE_LOG_DEBUG("Update slot version : {}, current version: {}", !slot.GetBlock()->layout_version_, !version_num);
 
-  layout_version_t old_version = slot.GetBlock()->layout_version_;
-
   // For common case
   if (!version_num == 0) {
     return {first_dt_->Update(txn, slot, redo), slot};
   }
+
+  layout_version_t old_version = slot.GetBlock()->layout_version_;
+
   // The version of the current slot is the same as the version num
   if (old_version == version_num) {
     return {tables_.Find(version_num)->second.data_table->Update(txn, slot, redo), slot};
