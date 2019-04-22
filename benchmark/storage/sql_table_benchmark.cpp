@@ -905,6 +905,42 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMatchDelete)(benchmark::State 
   state.SetItemsProcessed(state.iterations() * num_deletes_);
 }
 
+// Insert num_deletes_ tuples and then delete them in sequential order
+// The SqlTable has multiple schema versions and and the transaction version does not match the tuple version
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchDelete)(benchmark::State &state) {
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    // Create a sql_table
+    storage::SqlTable table(&sql_block_store_, *schema_, catalog::table_oid_t(0));
+    // We can use dummy timestamps here since we're not invoking concurrency control
+    transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                        LOGGING_DISABLED);
+    // insert tuples
+    std::vector<storage::TupleSlot> delete_order;
+    for (uint32_t i = 0; i < num_deletes_; ++i) {
+      delete_order.emplace_back(table.Insert(&txn, *redo_, storage::layout_version_t(0)));
+    }
+
+    // create new schema
+    catalog::col_oid_t col_oid(column_num_);
+    std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+    new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+    catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+    table.UpdateSchema(new_schema);
+
+    uint64_t elapsed_ms;
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      for (uint32_t i = 0; i < num_deletes_; ++i) {
+        table.Delete(&txn, delete_order[i], storage::layout_version_t(1));
+      }
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+  }
+  state.SetItemsProcessed(state.iterations() * num_deletes_);
+}
+
 // Update a tuple in a SqlTable num_updates_ times in a single thread
 // The SqlTable has multiple schema versions and the redo can be updated in place
 // NOLINTNEXTLINE
@@ -1074,13 +1110,13 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
 
@@ -1092,11 +1128,13 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(bench
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond);
 
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+
 BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
