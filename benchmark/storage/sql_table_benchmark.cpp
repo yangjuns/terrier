@@ -78,6 +78,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
     delete table_;
     delete version_table_;
     for (uint32_t i = 0; i < num_threads_; ++i) delete[] read_buffers_[i];
+    for (uint32_t i = 0; i < num_threads_; ++i) delete[] version_read_buffers_[i];
     columns_.clear();
     read_buffers_.clear();
     reads_.clear();
@@ -139,26 +140,32 @@ class SqlTableBenchmark : public benchmark::Fixture {
     version_slot_ = version_table_->Insert(init_txn, *init_row, storage::layout_version_t(0));
     txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
     delete[] init_buffer;
+
+    // generate a vector of ProjectedRow buffers for concurrent reads
+    for (uint32_t i = 0; i < num_threads_; ++i) {
+      // Create read buffer
+      byte *read_buffer = common::AllocationUtil::AllocateAligned(version_initializer_->ProjectedRowSize());
+      storage::ProjectedRow *read = version_initializer_->InitializeRow(read_buffer);
+      version_read_buffers_.emplace_back(read_buffer);
+      version_reads_.emplace_back(read);
+    }
   }
 
   storage::layout_version_t GetVersion(transaction::TransactionContext *txn, uint32_t id) {
     // need to know which version is it
-    // TODO(yangjuns): we can avoid allocating space for your version potentially
-    byte *version_buffer = common::AllocationUtil::AllocateAligned(version_initializer_->ProjectedRowSize());
-    storage::ProjectedRow *version_row = version_initializer_->InitializeRow(version_buffer);
     // printf("version slot %p, %d\n", version_slot_.GetBlock(), version_slot_.GetOffset());
-    bool succ = version_table_->Select(txn, version_slot_, version_row, *version_map_, storage::layout_version_t(0));
+    bool succ =
+        version_table_->Select(txn, version_slot_, version_reads_[id], *version_map_, storage::layout_version_t(0));
     if (!succ) {
       LOG_INFO("WTF??? SELECT FAILed!!");
     }
-    byte *version_ptr = version_row->AccessWithNullCheck(version_map_->at(catalog::col_oid_t(101)));
+    byte *version_ptr = version_reads_[id]->AccessWithNullCheck(version_map_->at(catalog::col_oid_t(101)));
     storage::layout_version_t my_version(0);
     if (version_ptr == nullptr) {
       LOG_INFO("{}, null version!! supprising", id);
     } else {
       my_version = storage::layout_version_t(*reinterpret_cast<uint32_t *>(version_ptr));
     }
-    delete[] version_buffer;
     return my_version;
   }
 
@@ -218,9 +225,14 @@ class SqlTableBenchmark : public benchmark::Fixture {
   // slots lock
   common::SpinLatch slot_latch_;
   common::SpinLatch schema_latch_;
+
   // Sql Table
   storage::SqlTable *table_ = nullptr;
   storage::SqlTable *version_table_ = nullptr;
+
+  // Version Read buffers pointers for concurrent reads
+  std::vector<byte *> version_read_buffers_;
+  std::vector<storage::ProjectedRow *> version_reads_;
 
   // Tuple properties
   const storage::ProjectedRowInitializer *initializer_ = nullptr;
