@@ -107,7 +107,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   void CreateVersionTable() {
     // create a version table acting like catalog
-    LOG_INFO("Creating version table ...")
     catalog::col_oid_t col_oid(100);
     std::vector<catalog::Schema::Column> columns;
     columns.emplace_back("table_oid", type::TypeId::INTEGER, false, col_oid++);
@@ -116,7 +115,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
     version_table_ = new storage::SqlTable(&version_block_store_, *version_schema_, catalog::table_oid_t(1));
 
     // insert (123, 0) into version_table
-    LOG_INFO("Inserting (123, 0) into version table ...")
     std::vector<catalog::col_oid_t> all_oids(columns.size());
     for (size_t i = 0; i < all_oids.size(); i++) all_oids[i] = columns[i].GetOid();
 
@@ -141,7 +139,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
     version_slot_ = version_table_->Insert(init_txn, *init_row, storage::layout_version_t(0));
     txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
     delete[] init_buffer;
-    LOG_INFO("FINISHED");
   }
 
   storage::layout_version_t GetVersion(transaction::TransactionContext *txn, uint32_t id) {
