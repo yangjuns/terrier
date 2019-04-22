@@ -175,6 +175,10 @@ std::pair<bool, storage::TupleSlot> SqlTable::Update(transaction::TransactionCon
 
   layout_version_t old_version = slot.GetBlock()->layout_version_;
 
+  // For common case
+  if (!version_num == 0) {
+    return {first_dt_->Update(txn, slot, redo), slot};
+  }
   // The version of the current slot is the same as the version num
   if (old_version == version_num) {
     return {tables_.Find(version_num)->second.data_table->Update(txn, slot, redo), slot};
