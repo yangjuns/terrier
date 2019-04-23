@@ -446,7 +446,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     return aborted;
   };
 
-  uint64_t elapsed_ms = 0;
   // NOLINTNEXTLINE
   for (auto _ : state) {
     StartGC(&txn_manager_);
@@ -457,15 +456,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
         commited_txns_[id] += commited;
       }
     };
-    uint64_t local_elapsed_ms = 0;
+    uint64_t elapsed_ms = 0;
     common::WorkerPool thread_pool(num_threads_, {});
     {
-      common::ScopedTimer timer(&local_elapsed_ms);
+      common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
     }
-    state.SetIterationTime(static_cast<double>(local_elapsed_ms) / 1000.0);
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
-    elapsed_ms += local_elapsed_ms;
   }
   // sum of commited
   uint32_t sum = 0;
