@@ -1148,10 +1148,10 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchm
 // Benchmark for concurrent workload
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
-    ->Unit(benchmark::kMillisecond)
-    ->UseManualTime()
-    ->Iterations(4);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
+//    ->Unit(benchmark::kMillisecond)
+//    ->UseManualTime()
+//    ->Iterations(4);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
