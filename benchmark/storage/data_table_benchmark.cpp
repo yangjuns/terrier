@@ -5,6 +5,7 @@
 #include "common/scoped_timer.h"
 #include "common/strong_typedef.h"
 #include "storage/data_table.h"
+#include "storage/garbage_collector.h"
 #include "storage/storage_util.h"
 #include "transaction/transaction_context.h"
 #include "transaction/transaction_manager.h"
@@ -50,6 +51,21 @@ class DataTableBenchmark : public benchmark::Fixture {
     reads_.clear();
   }
 
+  void StartGC(transaction::TransactionManager *const txn_manager) {
+    gc_ = new storage::GarbageCollector(txn_manager);
+    run_gc_ = true;
+    gc_thread_ = std::thread([this] { GCThreadLoop(); });
+  }
+
+  void EndGC() {
+    run_gc_ = false;
+    gc_thread_.join();
+    // Make sure all garbage is collected. This take 2 runs for unlink and deallocate
+    gc_->PerformGarbageCollection();
+    gc_->PerformGarbageCollection();
+    delete gc_;
+  }
+
   // Tuple layout
   const uint8_t column_size_ = 8;
   const storage::BlockLayout layout_{{column_size_, column_size_, column_size_}};
@@ -69,7 +85,7 @@ class DataTableBenchmark : public benchmark::Fixture {
   // Test infrastructure
   std::default_random_engine generator_;
   storage::BlockStore block_store_{1000, 1000};
-  storage::RecordBufferSegmentPool buffer_pool_{num_inserts_, buffer_pool_reuse_limit_};
+  storage::RecordBufferSegmentPool buffer_pool_{num_inserts_ * 4, buffer_pool_reuse_limit_};
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Insert buffer pointers
@@ -83,6 +99,19 @@ class DataTableBenchmark : public benchmark::Fixture {
   // Read buffers pointers for concurrent reads
   std::vector<byte *> read_buffers_;
   std::vector<storage::ProjectedRow *> reads_;
+
+  // GC
+  std::thread gc_thread_;
+  storage::GarbageCollector *gc_ = nullptr;
+  volatile bool run_gc_ = false;
+  const std::chrono::milliseconds gc_period_{10};
+
+  void GCThreadLoop() {
+    while (run_gc_) {
+      std::this_thread::sleep_for(gc_period_);
+      gc_->PerformGarbageCollection();
+    }
+  }
 };
 
 // Insert the num_inserts_ of tuples into a DataTable in a single thread
@@ -149,6 +178,7 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialDelete)(benchmark::State &state
   // NOLINTNEXTLINE
   for (auto _ : state) {
     storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
+    StartGC(&txn_manager_);
     std::vector<storage::TupleSlot> delete_order;
     // Populate read_table by inserting tuples
     auto txn = txn_manager_.BeginTransaction();
@@ -164,7 +194,7 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialDelete)(benchmark::State &state
       }
     }
     txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-    delete txn;
+    EndGC();
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
   }
 
@@ -264,8 +294,8 @@ BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMilliseco
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentRandomRead)->Unit(benchmark::kMillisecond)->UseRealTime();
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 
-BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
