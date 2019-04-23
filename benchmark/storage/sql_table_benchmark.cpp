@@ -472,9 +472,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   for (auto c : commited_txns_) {
     sum += c;
   }
-  // TODO(yangjuns): Compute throughput by ourselves. The google benchmark number doesn't make sense.
-  LOG_INFO("sum {}, elapsed_time: {}, throughput: {}", sum, static_cast<double>(elapsed_ms) / 1000,
-           sum / (static_cast<double>(elapsed_ms) / 1000));
   state.SetItemsProcessed(sum);
 }
 
@@ -1153,7 +1150,10 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 // Benchmark for concurrent workload
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't have
 // compaction so it will blow up memory
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)->Unit(benchmark::kMillisecond)->Iterations(4);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(4)
+    ->UseRealTime();
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
