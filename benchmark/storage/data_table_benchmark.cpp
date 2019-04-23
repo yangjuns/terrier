@@ -296,6 +296,6 @@ BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMilliseco
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 
-// BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
