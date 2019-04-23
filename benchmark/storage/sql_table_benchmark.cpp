@@ -192,7 +192,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   std::pair<uint32_t, storage::TupleSlot> GetHotSpotSlot(const std::vector<storage::TupleSlot> &slots) {
     // TODO(yangjuns): this hotspot index can be pre-generated
     double hot_spot_prob = 0.8;
-    auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * 0.2);
+    auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * 0.05);
     uint32_t index = 0;
     std::uniform_real_distribution<> real_dist(0, 1);
     if (real_dist(generator_) < hot_spot_prob) {
@@ -360,7 +360,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
   auto schema_change = [&]() {
     // sleep for 5 seconds
     std::this_thread::sleep_for(std::chrono::seconds(5));
-    storage::layout_version_t my_version(version);
 
     // change the schema
     auto txn = txn_manager_.BeginTransaction();
@@ -375,7 +374,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
     std::thread t1(read);
     std::thread t2(schema_change);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(60));
+    std::this_thread::sleep_for(std::chrono::seconds(180));
     // stop all threads
     finished = true;
     t1.join();
