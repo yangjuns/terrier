@@ -1,3 +1,4 @@
+#include <iostream>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -241,7 +242,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   // Workload
   const uint32_t num_txns_ = 100000;
-  const uint32_t num_inserts_ = 10000000;
+  const uint32_t num_inserts_ = 10000;
   const uint32_t num_deletes_ = 10000000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
@@ -289,6 +290,110 @@ class SqlTableBenchmark : public benchmark::Fixture {
     }
   }
 };
+
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &state) {
+  CreateVersionTable();
+  // Populate table_ by inserting tuples
+  LOG_INFO("inserting tuples ...");
+
+  auto init_txn = txn_manager_.BeginTransaction();
+  //  printf("------ begin insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
+  //         !init_txn->TxnId().load(), init_txn);
+  std::vector<storage::TupleSlot> slots;
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
+  }
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+
+  // create new schema
+  catalog::col_oid_t col_oid(column_num_);
+  std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+  new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+  catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+
+  // throughput vector
+  std::vector<double> throughput;
+  uint32_t version = 0;
+  bool finished = false;
+  // Select Thread
+  auto read = [&]() {
+    uint64_t committed_txns_count = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    while (true) {
+      auto txn = txn_manager_.BeginTransaction();
+      // get my version
+      storage::layout_version_t my_version(version);
+
+      // get columns to read
+      std::vector<catalog::col_oid_t> all_oids;
+      if (!my_version == 0) {
+        for (auto &c : schema_->GetColumns()) {
+          all_oids.emplace_back(c.GetOid());
+        }
+      } else {
+        for (auto &c : new_schema.GetColumns()) {
+          all_oids.emplace_back(c.GetOid());
+        }
+      }
+
+      auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+      byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+      storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
+
+      // Select never fails
+      auto slot_pair = GetHotSpotSlot(slots);
+      bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
+      if (succ) {
+        committed_txns_count++;
+        txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      } else {
+        txn_manager_.Abort(txn);
+      }
+      // free memory
+      delete[] read_buffer;
+      std::chrono::duration<double, std::milli> diff = std::chrono::high_resolution_clock::now() - start;
+      if (diff.count() > 1000) {
+        throughput.emplace_back(static_cast<double>(committed_txns_count) / (diff.count() / 1000));
+        committed_txns_count = 0;
+        start = std::chrono::high_resolution_clock::now();
+      }
+      if (finished) break;
+    }
+  };
+
+  auto schema_change = [&]() {
+    // sleep for 5 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    storage::layout_version_t my_version(version);
+
+    // change the schema
+    auto txn = txn_manager_.BeginTransaction();
+    table_->UpdateSchema(new_schema);
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    version = 1;
+  };
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    StartGC(&txn_manager_);
+    std::thread t1(read);
+    std::thread t2(schema_change);
+    // sleep for 30 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(30));
+    // stop all threads
+    finished = true;
+    t1.join();
+    t2.join();
+    // print throughput
+    for (size_t i = 0; i < throughput.size(); i++) {
+      LOG_INFO("({}, {})", i + 1, throughput[i])
+    }
+    EndGC();
+  }
+  state.SetItemsProcessed(0);
+}
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
@@ -1124,28 +1229,30 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
-// Benchmarks for version match
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
-
-// Benchmarks for version mismatch
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
+//// Benchmarks for version match
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
+//
+//// Benchmarks for version mismatch
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchRandomRead)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
 
 // Benchmark for concurrent workload
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
+
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
