@@ -73,6 +73,9 @@ class DataTableBenchmark : public benchmark::Fixture {
   // Tuple properties
   const storage::ProjectedRowInitializer initializer_ = storage::ProjectedRowInitializer::CreateProjectedRowInitializer(
       layout_, StorageTestUtil::ProjectionListAllColumns(layout_));
+  const uint32_t max_scan_size_ = 1000;
+  const storage::ProjectedColumnsInitializer col_initializer_ =
+      storage::ProjectedColumnsInitializer(layout_, StorageTestUtil::ProjectionListAllColumns(layout_), max_scan_size_);
 
   // Workload
   const uint32_t num_inserts_ = 10000000;
@@ -284,6 +287,36 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, Update)(benchmark::State &state) {
   state.SetItemsProcessed(state.iterations() * num_updates_);
 }
 
+// Scan the num_insert_ of tuples from a SqlTable in a single thread
+// The SqlTable has only one schema version
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(DataTableBenchmark, Scan)(benchmark::State &state) {
+  storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
+
+  // populate read_table_ by inserting tuples
+  // We can use dummy timestamps here since we're not invoking concurrency control
+  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                      LOGGING_DISABLED);
+  for (uint32_t i = 0; i < num_reads_; ++i) {
+    table.Insert(&txn, *redo_);
+  }
+
+  // create a scan buffer
+  byte *buffer = common::AllocationUtil::AllocateAligned(col_initializer_.ProjectedColumnsSize());
+  storage::ProjectedColumns *scan_pr = col_initializer_.Initialize(buffer);
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    auto start_pos = table.begin();
+    while (start_pos != table.end()) {
+      table.Scan(&txn, &start_pos, scan_pr);
+      scan_pr = col_initializer_.Initialize(buffer);
+    }
+  }
+  delete[] buffer;
+  state.SetItemsProcessed(state.iterations() * num_reads_);
+}
+
 BENCHMARK_REGISTER_F(DataTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(DataTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
@@ -297,5 +330,7 @@ BENCHMARK_REGISTER_F(DataTableBenchmark, RandomRead)->Unit(benchmark::kMilliseco
 BENCHMARK_REGISTER_F(DataTableBenchmark, SequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 
 BENCHMARK_REGISTER_F(DataTableBenchmark, Update)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(DataTableBenchmark, Scan)->Unit(benchmark::kMillisecond);
 
 }  // namespace terrier
