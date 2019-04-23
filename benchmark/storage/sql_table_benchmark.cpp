@@ -62,8 +62,6 @@ class SqlTableBenchmark : public benchmark::Fixture {
       read_buffers_.emplace_back(read_buffer);
       reads_.emplace_back(read);
     }
-
-    CreateVersionTable();
   }
 
   void TearDown(const benchmark::State &state) final {
@@ -77,8 +75,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
     delete version_map_;
     delete table_;
     delete version_table_;
-    for (uint32_t i = 0; i < num_threads_; ++i) delete[] read_buffers_[i];
-    for (uint32_t i = 0; i < num_threads_; ++i) delete[] version_read_buffers_[i];
+    for (auto p : read_buffers_) delete[] p;
+    for (auto p : version_read_buffers_) delete[] p;
     columns_.clear();
     read_buffers_.clear();
     reads_.clear();
@@ -294,6 +292,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
+  CreateVersionTable();
   // Populate table_ by inserting tuples
   LOG_INFO("inserting tuples ...");
 
@@ -1111,17 +1110,17 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
   state.SetItemsProcessed(state.iterations() * num_inserts_);
 }
 
-//// Benchmarks for common cases
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
-//
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
-//
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
-//
+// Benchmarks for common cases
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
+
 BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
-//
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
-//
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
+
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 //
 // Benchmarks for version match
@@ -1129,7 +1128,7 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialDelete)->Unit(ben
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchSequentialRead)->Unit(benchmark::kMillisecond);
 
@@ -1139,7 +1138,7 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchDelete)->Unit(benchmark
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchUpdate)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 //
