@@ -10,6 +10,7 @@
 #include "transaction/transaction_manager.h"
 #include "util/multithread_test_util.h"
 #include "util/storage_test_util.h"
+#include "util/transaction_test_util.h"
 
 namespace terrier {
 
@@ -69,6 +70,7 @@ class DataTableBenchmark : public benchmark::Fixture {
   std::default_random_engine generator_;
   storage::BlockStore block_store_{1000, 1000};
   storage::RecordBufferSegmentPool buffer_pool_{num_inserts_, buffer_pool_reuse_limit_};
+  transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Insert buffer pointers
   byte *redo_buffer_;
@@ -141,32 +143,32 @@ BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialRead)(benchmark::State &state) 
   state.SetItemsProcessed(state.iterations() * num_reads_);
 }
 
-// Insert num_inserts_ tuples and delete them in sequential order
+// Insert num_deletes_ tuples and delete them in sequential order
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(DataTableBenchmark, SequentialDelete)(benchmark::State &state) {
-  // Populate read_table by inserting tuples
-  // We can use dummy timestamps here since we're not invoking concurrency control
-  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
-                                      LOGGING_DISABLED);
-
   // NOLINTNEXTLINE
   for (auto _ : state) {
     storage::DataTable table(&block_store_, layout_, storage::layout_version_t(0));
     std::vector<storage::TupleSlot> delete_order;
+    // Populate read_table by inserting tuples
+    auto txn = txn_manager_.BeginTransaction();
+
     for (uint32_t i = 0; i < num_deletes_; ++i) {
-      delete_order.emplace_back(table.Insert(&txn, *redo_));
+      delete_order.emplace_back(table.Insert(txn, *redo_));
     }
     uint64_t elapsed_ms;
     {
       common::ScopedTimer timer(&elapsed_ms);
       for (uint32_t i = 0; i < num_deletes_; ++i) {
-        table.Delete(&txn, delete_order[i]);
+        table.Delete(txn, delete_order[i]);
       }
     }
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    delete txn;
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
   }
 
-  state.SetItemsProcessed(state.iterations() * num_reads_);
+  state.SetItemsProcessed(state.iterations() * num_deletes_);
 }
 
 // Read the num_reads_ of tuples in a random order from a DataTable in a single thread
