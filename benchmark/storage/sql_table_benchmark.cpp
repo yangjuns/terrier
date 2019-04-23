@@ -540,24 +540,23 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, SingleVersionSequentialRead)(benchmark::St
 // The SqlTable has only one schema version
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, SingleVersionSequentialDelete)(benchmark::State &state) {
-  // Populate read_table_ by inserting tuples
-  // We can use dummy timestamps here since we're not invoking concurrency control
-  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
-                                      LOGGING_DISABLED);
-
   // NOLINTNEXTLINE
   for (auto _ : state) {
+    StartGC(&txn_manager_);
+    auto txn = txn_manager_.BeginTransaction();
     std::vector<storage::TupleSlot> delete_order;
     for (uint32_t i = 0; i < num_deletes_; ++i) {
-      delete_order.emplace_back(table_->Insert(&txn, *redo_, storage::layout_version_t(0)));
+      delete_order.emplace_back(table_->Insert(txn, *redo_, storage::layout_version_t(0)));
     }
     uint64_t elapsed_ms;
     {
       common::ScopedTimer timer(&elapsed_ms);
       for (uint32_t i = 0; i < num_deletes_; ++i) {
-        table_->Delete(&txn, delete_order[i], storage::layout_version_t(0));
+        table_->Delete(txn, delete_order[i], storage::layout_version_t(0));
       }
     }
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    EndGC();
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
   }
 
