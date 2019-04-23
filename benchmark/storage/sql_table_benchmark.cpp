@@ -242,7 +242,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   // Workload
   const uint32_t num_txns_ = 100000;
-  const uint32_t num_inserts_ = 10000;
+  const uint32_t num_inserts_ = 10000000;
   const uint32_t num_deletes_ = 10000000;
   const uint32_t num_reads_ = 10000000;
   const uint32_t num_updates_ = 10000000;
@@ -293,13 +293,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &state) {
-  CreateVersionTable();
-  // Populate table_ by inserting tuples
-  LOG_INFO("inserting tuples ...");
-
   auto init_txn = txn_manager_.BeginTransaction();
-  //  printf("------ begin insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
-  //         !init_txn->TxnId().load(), init_txn);
   std::vector<storage::TupleSlot> slots;
   // insert tuples into old schema
   for (uint32_t i = 0; i < num_inserts_; ++i) {
@@ -381,14 +375,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
     std::thread t1(read);
     std::thread t2(schema_change);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(30));
+    std::this_thread::sleep_for(std::chrono::seconds(60));
     // stop all threads
     finished = true;
     t1.join();
     t2.join();
     // print throughput
     for (size_t i = 0; i < throughput.size(); i++) {
-      LOG_INFO("({}, {})", i + 1, throughput[i])
+      printf("(%zu, %d)\n", i + 1, static_cast<int>(throughput[i]));
     }
     EndGC();
   }
