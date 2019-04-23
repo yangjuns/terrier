@@ -241,10 +241,10 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   // Workload
   const uint32_t num_txns_ = 100000;
-  const uint32_t num_inserts_ = 10000;
-  const uint32_t num_deletes_ = 10000;
-  const uint32_t num_reads_ = 10000;
-  const uint32_t num_updates_ = 10000;
+  const uint32_t num_inserts_ = 10000000;
+  const uint32_t num_deletes_ = 10000000;
+  const uint32_t num_reads_ = 10000000;
+  const uint32_t num_updates_ = 10000000;
   const uint32_t num_threads_ = 4;
   const uint64_t buffer_pool_reuse_limit_ = 10000000;
   const uint32_t scan_buffer_size_ = 1000;  // maximum number of tuples in a buffer
