@@ -189,20 +189,24 @@ class SqlTableBenchmark : public benchmark::Fixture {
    * @param slots
    * @return
    */
-  std::pair<uint32_t, storage::TupleSlot> GetHotSpotSlot(const std::vector<storage::TupleSlot> &slots) {
-    // TODO(yangjuns): this hotspot index can be pre-generated
-    double hot_spot_prob = 0.8;
-    auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * 0.05);
+  std::pair<uint32_t, storage::TupleSlot> GetHotSpotSlot(const std::vector<storage::TupleSlot> &slots, double hs_ratio,
+                                                         double hs_prob) {
     uint32_t index = 0;
+    auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * hs_ratio);
     std::uniform_real_distribution<> real_dist(0, 1);
-    if (real_dist(generator_) < hot_spot_prob) {
+    if (real_dist(generator_) < hs_prob) {
       std::uniform_int_distribution<> int_dist(0, hot_spot_range - 1);
       index = int_dist(generator_);
     } else {
       std::uniform_int_distribution<> int_dist(hot_spot_range, num_inserts_ - 1);
       index = int_dist(generator_);
     }
-    return {index, slots[index]};
+    storage::TupleSlot result;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
+      result = slots[index];
+    }
+    return {index, result};
   }
 
   void StartGC(transaction::TransactionManager *const txn_manager) {
@@ -222,6 +226,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
 
   // schema_latch_
   common::SpinLatch schema_latch_;
+  common::SpinLatch slot_latch_;
 
   // Sql Table
   storage::SqlTable *table_ = nullptr;
@@ -337,7 +342,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
       storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
 
       // Select never fails
-      auto slot_pair = GetHotSpotSlot(slots);
+      auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
       bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
       if (succ) {
         committed_txns_count++;
@@ -359,7 +364,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
 
   auto schema_change = [&]() {
     // sleep for 5 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(60));
 
     // change the schema
     auto txn = txn_manager_.BeginTransaction();
@@ -375,6 +380,118 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
     std::thread t2(schema_change);
     // sleep for 30 seconds
     std::this_thread::sleep_for(std::chrono::seconds(180));
+    // stop all threads
+    finished = true;
+    t1.join();
+    t2.join();
+    // print throughput
+    for (size_t i = 0; i < throughput.size(); i++) {
+      printf("(%zu, %d)\n", i + 1, static_cast<int>(throughput[i]));
+    }
+    EndGC();
+  }
+  state.SetItemsProcessed(0);
+}
+
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &state) {
+  auto init_txn = txn_manager_.BeginTransaction();
+  std::vector<storage::TupleSlot> slots;
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
+  }
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+
+  // create new schema
+  catalog::col_oid_t col_oid(column_num_);
+  std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+  new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+  catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+
+  // throughput vector
+  std::vector<double> throughput;
+  uint32_t version = 0;
+
+  bool finished = false;
+
+  // Update Thread
+  auto update = [&]() {
+    uint64_t committed_txns_count = 0;
+    auto start = std::chrono::high_resolution_clock::now();
+    while (true) {
+      auto txn = txn_manager_.BeginTransaction();
+      // get my version
+      storage::layout_version_t my_version(version);
+
+      // get correct columns
+      std::vector<catalog::col_oid_t> all_oids;
+      if (!my_version == 0) {
+        for (auto &c : schema_->GetColumns()) {
+          all_oids.emplace_back(c.GetOid());
+        }
+      } else {
+        for (auto &c : new_schema.GetColumns()) {
+          all_oids.emplace_back(c.GetOid());
+        }
+      }
+
+      auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+      byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+      storage::ProjectedRow *update = pair.first.InitializeRow(update_buffer);
+      if (!my_version == 0) {
+        CatalogTestUtil::PopulateRandomRow(update, *schema_, pair.second, &generator_);
+      } else {
+        CatalogTestUtil::PopulateRandomRow(update, new_schema, pair.second, &generator_);
+      }
+
+      // Update never fails
+      auto slot_pair = GetHotSpotSlot(slots, 1, 1);
+      auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
+      if (result.first) {
+        committed_txns_count++;
+        // check if the tuple slot got updated
+        if (result.second != slot_pair.second) {
+          {
+            common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
+            slots[slot_pair.first] = result.second;
+          }
+        }
+        txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      } else {
+        LOG_INFO("impossible")
+        txn_manager_.Abort(txn);
+      }
+      // free memory
+      delete[] update_buffer;
+      std::chrono::duration<double, std::milli> diff = std::chrono::high_resolution_clock::now() - start;
+      if (diff.count() > 1000) {
+        throughput.emplace_back(static_cast<double>(committed_txns_count) / (diff.count() / 1000));
+        committed_txns_count = 0;
+        start = std::chrono::high_resolution_clock::now();
+      }
+      if (finished) break;
+    }
+  };
+
+  auto schema_change = [&]() {
+    // sleep for 5 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+
+    // change the schema
+    auto txn = txn_manager_.BeginTransaction();
+    table_->UpdateSchema(new_schema);
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    version = 1;
+  };
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    StartGC(&txn_manager_);
+    std::thread t1(update);
+    std::thread t2(schema_change);
+    // sleep for 30 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(60));
     // stop all threads
     finished = true;
     t1.join();
@@ -462,7 +579,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
 
     // Select never fails
-    auto slot_pair = GetHotSpotSlot(slots);
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
     bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
     if (succ) {
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
@@ -499,7 +616,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     CatalogTestUtil::PopulateRandomRow(update_row, *my_schema, pair.second, &generator_);
 
     // Update the tuple
-    auto slot_pair = GetHotSpotSlot(slots);
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
     auto update_pair = table_->Update(txn, slot_pair.second, *update_row, pair.second, my_version);
     if (update_pair.first) {
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
@@ -1243,8 +1360,11 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
 
-// Benchmark for concurrent workload
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
+//// Benchmark for concurrent workload
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
+//
+//// Benchmark for concurrent workload
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
