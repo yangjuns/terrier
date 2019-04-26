@@ -1420,7 +1420,53 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, SingleVersionScan)(benchmark::State &state
 // Scan the num_insert_ of tuples from a SqlTable in a single thread
 // The SqlTable has two schema versions
 // NOLINTNEXTLINE
-BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state) {
+BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMatchScan)(benchmark::State &state) {
+  // Populate read_table_ by inserting tuples
+  // We can use dummy timestamps here since we're not invoking concurrency control
+  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                      LOGGING_DISABLED, ACTION_FRAMEWORK_DISABLED);
+
+  // create new schema
+  catalog::col_oid_t col_oid(column_num_);
+  std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+  new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+  catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+  table_->UpdateSchema(new_schema);
+
+  // create a new insert buffer
+  std::vector<catalog::col_oid_t> all_col_oids(new_columns.size());
+  for (size_t i = 0; i < new_columns.size(); i++) all_col_oids[i] = new_columns[i].GetOid();
+  auto row_pair = table_->InitializerForProjectedRow(all_col_oids, storage::layout_version_t(1));
+  byte *insert_buffer = common::AllocationUtil::AllocateAligned(row_pair.first.ProjectedRowSize());
+  storage::ProjectedRow *insert_pr = row_pair.first.InitializeRow(insert_buffer);
+  CatalogTestUtil::PopulateRandomRow(insert_pr, new_schema, row_pair.second, &generator_);
+
+  // insert tuples into new schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    table_->Insert(&txn, *insert_pr, storage::layout_version_t(1));
+  }
+
+  // create a new read buffer
+  auto col_pair = table_->InitializerForProjectedColumns(all_col_oids, scan_buffer_size_, storage::layout_version_t(1));
+  byte *buffer = common::AllocationUtil::AllocateAligned(col_pair.first.ProjectedColumnsSize());
+  storage::ProjectedColumns *scan_pr = col_pair.first.Initialize(buffer);
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    auto start_pos = table_->begin(storage::layout_version_t(1));
+    while (start_pos != table_->end()) {
+      table_->Scan(&txn, &start_pos, scan_pr, col_pair.second, storage::layout_version_t(1));
+      scan_pr = col_pair.first.Initialize(buffer);
+    }
+  }
+  delete[] buffer;
+  state.SetItemsProcessed(state.iterations() * num_inserts_);
+}
+
+// Scan the num_insert_ of tuples from a SqlTable in a single thread
+// The SqlTable has two schema versions
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionHalfMatchScan)(benchmark::State &state) {
   // Populate read_table_ by inserting tuples
   // We can use dummy timestamps here since we're not invoking concurrency control
   transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
@@ -1450,6 +1496,45 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionScan)(benchmark::State &state)
   for (uint32_t i = 0; i < num_inserts_ / 2; ++i) {
     table_->Insert(&txn, *insert_pr, storage::layout_version_t(1));
   }
+
+  // create a new read buffer
+  auto col_pair = table_->InitializerForProjectedColumns(all_col_oids, scan_buffer_size_, storage::layout_version_t(1));
+  byte *buffer = common::AllocationUtil::AllocateAligned(col_pair.first.ProjectedColumnsSize());
+  storage::ProjectedColumns *scan_pr = col_pair.first.Initialize(buffer);
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    auto start_pos = table_->begin(storage::layout_version_t(1));
+    while (start_pos != table_->end()) {
+      table_->Scan(&txn, &start_pos, scan_pr, col_pair.second, storage::layout_version_t(1));
+      scan_pr = col_pair.first.Initialize(buffer);
+    }
+  }
+  delete[] buffer;
+  state.SetItemsProcessed(state.iterations() * num_inserts_);
+}
+
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State &state) {
+  // Populate read_table_ by inserting tuples
+  // We can use dummy timestamps here since we're not invoking concurrency control
+  transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                      LOGGING_DISABLED, ACTION_FRAMEWORK_DISABLED);
+
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    table_->Insert(&txn, *redo_, storage::layout_version_t(0));
+  }
+
+  // create new schema
+  catalog::col_oid_t col_oid(column_num_);
+  std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+  new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+  catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+  table_->UpdateSchema(new_schema);
+
+  // create a new insert buffer
+  std::vector<catalog::col_oid_t> all_col_oids(new_columns.size());
 
   // create a new read buffer
   auto col_pair = table_->InitializerForProjectedColumns(all_col_oids, scan_buffer_size_, storage::layout_version_t(1));
@@ -1501,7 +1586,11 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMil
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionScan)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionHalfMatchScan)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
