@@ -1521,31 +1521,46 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
   transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
                                       LOGGING_DISABLED);
 
-  // insert tuples into old schema
-  for (uint32_t i = 0; i < num_inserts_; ++i) {
-    table_->Insert(&txn, *redo_, storage::layout_version_t(0));
-  }
-
   // create new schema
-  catalog::col_oid_t col_oid(column_num_);
-  std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
-  new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
-  catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
-  table_->UpdateSchema(new_schema);
+  catalog::col_oid_t col_oid_1(column_num_);
+  std::vector<catalog::Schema::Column> new_columns_1(columns_.begin(), columns_.end());
+  new_columns_1.emplace_back("", type::TypeId::BIGINT, false, col_oid_1);
+  catalog::Schema new_schema_1(new_columns_1, storage::layout_version_t(1));
+  table_->UpdateSchema(new_schema_1);
 
   // create a new insert buffer
-  std::vector<catalog::col_oid_t> all_col_oids(new_columns.size());
+  std::vector<catalog::col_oid_t> all_col_oids_1(new_columns_1.size());
+  for (size_t i = 0; i < new_columns_1.size(); i++) all_col_oids_1[i] = new_columns_1[i].GetOid();
+  auto row_pair_1 = table_->InitializerForProjectedRow(all_col_oids_1, storage::layout_version_t(1));
+  byte *insert_buffer_1 = common::AllocationUtil::AllocateAligned(row_pair_1.first.ProjectedRowSize());
+  storage::ProjectedRow *insert_pr_1 = row_pair_1.first.InitializeRow(insert_buffer_1);
+  CatalogTestUtil::PopulateRandomRow(insert_pr_1, new_schema_1, row_pair_1.second, &generator_);
+
+  // insert tuples into new schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    table_->Insert(&txn, *insert_pr_1, storage::layout_version_t(1));
+  }
+  delete[] insert_buffer_1;
+  //========================================================================
+  // create new schema
+  catalog::col_oid_t col_oid_2(20000);
+  std::vector<catalog::Schema::Column> new_columns_2(columns_.begin(), columns_.end() - 1);
+  new_columns_2.emplace_back("", type::TypeId::BIGINT, false, col_oid_2);
+  catalog::Schema new_schema_2(new_columns_2, storage::layout_version_t(2));
+  table_->UpdateSchema(new_schema_2);
 
   // create a new read buffer
-  auto col_pair = table_->InitializerForProjectedColumns(all_col_oids, scan_buffer_size_, storage::layout_version_t(1));
+  std::vector<catalog::col_oid_t> all_col_oids_2(new_columns_2.size());
+  auto col_pair =
+      table_->InitializerForProjectedColumns(all_col_oids_2, scan_buffer_size_, storage::layout_version_t(2));
   byte *buffer = common::AllocationUtil::AllocateAligned(col_pair.first.ProjectedColumnsSize());
   storage::ProjectedColumns *scan_pr = col_pair.first.Initialize(buffer);
 
   // NOLINTNEXTLINE
   for (auto _ : state) {
-    auto start_pos = table_->begin(storage::layout_version_t(1));
+    auto start_pos = table_->begin(storage::layout_version_t(2));
     while (start_pos != table_->end()) {
-      table_->Scan(&txn, &start_pos, scan_pr, col_pair.second, storage::layout_version_t(1));
+      table_->Scan(&txn, &start_pos, scan_pr, col_pair.second, storage::layout_version_t(2));
       scan_pr = col_pair.first.Initialize(buffer);
     }
   }
