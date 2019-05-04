@@ -1424,7 +1424,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMatchScan)(benchmark::State &s
   // Populate read_table_ by inserting tuples
   // We can use dummy timestamps here since we're not invoking concurrency control
   transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
-                                      LOGGING_DISABLED, ACTION_FRAMEWORK_DISABLED);
+                                      LOGGING_DISABLED);
 
   // create new schema
   catalog::col_oid_t col_oid(column_num_);
@@ -1519,7 +1519,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
   // Populate read_table_ by inserting tuples
   // We can use dummy timestamps here since we're not invoking concurrency control
   transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
-                                      LOGGING_DISABLED, ACTION_FRAMEWORK_DISABLED);
+                                      LOGGING_DISABLED);
 
   // insert tuples into old schema
   for (uint32_t i = 0; i < num_inserts_; ++i) {
