@@ -519,7 +519,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
       if (stopped) break;
     }
   };
-  std::atomic<int> txn_run = 0;
+  // std::atomic<int> txn_run = 0;
   // NOLINTNEXTLINE
   for (auto _ : state) {
     StartGC(&txn_manager_);
@@ -528,8 +528,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
         uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update}, {id, id, id},
                                                                            {0.7, 0.2, 0.1}, &generator_);
         commited_txns_[id] += commited;
-        txn_run++;
-        LOG_INFO("txn_run : {}", txn_run);
+        // txn_run++;
+        // LOG_INFO("txn_run : {}", txn_run);
       }
     };
     uint64_t elapsed_ms = 0;
