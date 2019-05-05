@@ -741,6 +741,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   for (auto c : commited_txns_) {
     sum += c;
   }
+  LOG_INFO("schema updates count: {}", succ_schema_change_count);
   state.SetItemsProcessed(sum + succ_schema_change_count);
 }
 
