@@ -576,7 +576,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   catalog::col_oid_t change_start_oid(1000);
   LOG_INFO("Finished schema size {}", new_schemas.size());
   // create 4 workloads
-
+  bool stopped = false;
   // Insert workload
   auto insert = [&](uint32_t id) {
     auto txn = txn_manager_.BeginTransaction();
@@ -678,34 +678,37 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     delete my_schema;
     return aborted;
   };
-
+  std::atomic<int> succ_schema_change_count = 0;
   auto schema_change = [&](uint32_t id) {
-    auto txn = txn_manager_.BeginTransaction();
-    storage::layout_version_t my_version = GetVersion(txn, id);
-    bool aborted = false;
-    // update the version table
-    bool succ = UpdateVersionTable(txn, my_version + 1);
-    if (succ) {
-      // Create a schema to update
-      // there will be only one thread reaching here.
-      {
-        common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
-        new_schemas.emplace_back(ChangeSchema(*(new_schemas.end() - 1), &change_start_oid));
+    while(true) {
+      // sleep for 5 seconds
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      if(stopped) break;
+      auto txn = txn_manager_.BeginTransaction();
+      storage::layout_version_t my_version = GetVersion(txn, id);
+      // update the version table
+      bool succ = UpdateVersionTable(txn, my_version + 1);
+      if (succ) {
+        // Create a schema to update
+        // there will be only one thread reaching here.
+        {
+          common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+          new_schemas.emplace_back(ChangeSchema(*(new_schemas.end() - 1), &change_start_oid));
+        }
+
+        // update schema
+        TERRIER_ASSERT((!(new_schemas[!my_version + 1].GetVersion())) == (!my_version + 1),
+                       "the version of the schema should by 1 bigger");
+        table_->UpdateSchema(*(new_schemas.end() - 1));
+
+        txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+        succ_schema_change_count++;
+      } else {
+        // someone else is updating the schema, abort
+        txn_manager_.Abort(txn);
       }
-
-      // update schema
-      TERRIER_ASSERT((!(new_schemas[!my_version + 1].GetVersion())) == (!my_version + 1),
-                     "the version of the schema should by 1 bigger");
-      table_->UpdateSchema(*(new_schemas.end() - 1));
-
-      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-      aborted = false;
-    } else {
-      // someone else is updating the schema, abort
-      txn_manager_.Abort(txn);
-      aborted = true;
+      if(stopped) break;
     }
-    return aborted;
   };
 
   // NOLINTNEXTLINE
@@ -714,15 +717,18 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     auto workload = [&](uint32_t id) {
       for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
         uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution(
-            {read, insert, update, schema_change}, {id, id, id, id}, {0.7, 0.15, 0.1, 0.05}, &generator_);
+            {read, insert, update}, {id, id, id}, {0.7, 0.2, 0.1}, &generator_);
         commited_txns_[id] += commited;
       }
     };
     uint64_t elapsed_ms = 0;
     common::WorkerPool thread_pool(num_threads_, {});
+    std::thread t2(schema_change, 0);
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+      stopped= true;
+      t2.join();
     }
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
@@ -732,7 +738,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   for (auto c : commited_txns_) {
     sum += c;
   }
-  state.SetItemsProcessed(sum);
+  state.SetItemsProcessed(sum + succ_schema_change_count);
 }
 
 // NOLINTNEXTLINE
@@ -1806,15 +1812,15 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
-//    ->Unit(benchmark::kMillisecond)
-//    ->UseManualTime()
-//    ->Iterations(4);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
+ BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
     ->Unit(benchmark::kMillisecond)
     ->UseManualTime()
     ->Iterations(1);
+
+//BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
+//    ->Unit(benchmark::kMillisecond)
+//    ->UseManualTime()
+//    ->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
