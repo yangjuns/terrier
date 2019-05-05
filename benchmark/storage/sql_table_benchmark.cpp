@@ -538,10 +538,9 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
-
-      stopped = true;
-      t2.join();
     }
+    stopped = true;
+    t2.join();
     LOG_INFO("howmany inserts? {}", slots.size());
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
@@ -728,9 +727,9 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
-      stopped = true;
-      t2.join();
     }
+    stopped = true;
+    t2.join();
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
   }
