@@ -346,6 +346,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   volatile bool run_gc_ = false;
   const std::chrono::milliseconds gc_period_{10};
 
+  uint32_t schema_txn_wake_up_interval_ = 100;  // milliseconds
+
   void GCThreadLoop() {
     while (run_gc_) {
       std::this_thread::sleep_for(gc_period_);
@@ -489,7 +491,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
   auto schema_change = [&]() {
     while (true) {
       // sleep for 5 seconds
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::this_thread::sleep_for(std::chrono::milliseconds(schema_txn_wake_up_interval_));
       if (stopped) break;
       std::lock_guard<std::shared_mutex> lock(mutex_);
       auto txn = txn_manager_.BeginTransaction();
@@ -538,9 +540,10 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+
+      stopped = true;
+      t2.join();
     }
-    stopped = true;
-    t2.join();
     LOG_INFO("howmany inserts? {}", slots.size());
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
     EndGC();
@@ -680,10 +683,10 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   };
   std::atomic<int> succ_schema_change_count = 0;
   auto schema_change = [&](uint32_t id) {
-    while(true) {
+    while (true) {
       // sleep for 5 seconds
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-      if(stopped) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(schema_txn_wake_up_interval_));
+      if (stopped) break;
       auto txn = txn_manager_.BeginTransaction();
       storage::layout_version_t my_version = GetVersion(txn, id);
       // update the version table
@@ -707,7 +710,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
         // someone else is updating the schema, abort
         txn_manager_.Abort(txn);
       }
-      if(stopped) break;
+      if (stopped) break;
     }
   };
 
@@ -716,8 +719,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     StartGC(&txn_manager_);
     auto workload = [&](uint32_t id) {
       for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
-        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution(
-            {read, insert, update}, {id, id, id}, {0.7, 0.2, 0.1}, &generator_);
+        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update}, {id, id, id},
+                                                                           {0.7, 0.2, 0.1}, &generator_);
         commited_txns_[id] += commited;
       }
     };
@@ -727,7 +730,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
     {
       common::ScopedTimer timer(&elapsed_ms);
       MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
-      stopped= true;
+      stopped = true;
       t2.join();
     }
     state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
@@ -1812,15 +1815,15 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
- BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
     ->Unit(benchmark::kMillisecond)
     ->UseManualTime()
     ->Iterations(1);
 
-//BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
-//    ->Unit(benchmark::kMillisecond)
-//    ->UseManualTime()
-//    ->Iterations(1);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
+    ->Unit(benchmark::kMillisecond)
+    ->UseManualTime()
+    ->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
