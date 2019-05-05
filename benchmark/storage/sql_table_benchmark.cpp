@@ -1,8 +1,6 @@
 #include <iostream>
 #include <memory>
-#include <mutex>  // For std::unique_lock
-#include <shared_mutex>
-#include <thread>
+#include <shared_mutex>  //NOLINT lint thinks it's a c header which should be before c++ headers. Conflict with formatter.
 #include <utility>
 #include <vector>
 #include "benchmark/benchmark.h"
@@ -119,8 +117,8 @@ class SqlTableBenchmark : public benchmark::Fixture {
   }
 
   // Migrate tuples from t1 to t2. These tables have different schema. t2 is empty
-  void MigrateTables(transaction::TransactionContext *txn, storage::SqlTable *t1, catalog::Schema &t1_schema,
-                     storage::SqlTable *t2, catalog::Schema &t2_schema, std::vector<storage::TupleSlot> &slots) {
+  void MigrateTables(transaction::TransactionContext *txn, storage::SqlTable *t1, const catalog::Schema &t1_schema,
+                     storage::SqlTable *t2, const catalog::Schema &t2_schema, std::vector<storage::TupleSlot> *slots) {
     //    printf("txn_start_time: %lu\n", !txn->StartTime());
     //    printf("migrating from %p to %p\n", t1, t2);
     // create a buffer to read from t1
@@ -146,18 +144,18 @@ class SqlTableBenchmark : public benchmark::Fixture {
     auto t2_pair = t2->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
     byte *insert_buffer = common::AllocationUtil::AllocateAligned(t2_pair.first.ProjectedRowSize());
     storage::ProjectedRow *insert = t2_pair.first.InitializeRow(insert_buffer);
-    for (size_t i = 0; i < slots.size(); i++) {
+    for (size_t i = 0; i < slots->size(); i++) {
       //      printf("reading slot (%p,%d) \n", slots[i].GetBlock(),slots[i].GetOffset());
-      bool succ = t1->Select(txn, slots[i], read, t1_pair.second, storage::layout_version_t(0));
+      bool succ = t1->Select(txn, (*slots)[i], read, t1_pair.second, storage::layout_version_t(0));
       if (!succ) LOG_INFO("buggggg {}", i);
       // insert that into t2 with new schema
       storage::StorageUtil::CopyProjectionIntoProjection(
           *read, t1_pair.second, t1->GetBlockLayout(storage::layout_version_t(0)), insert, t2_pair.second);
       storage::TupleSlot new_slot = t2->Insert(txn, *insert, storage::layout_version_t(0));
       //      printf("new slot (%p,%d) \n", new_slot.GetBlock(),new_slot.GetOffset());
-      slots[i] = new_slot;
+      (*slots)[i] = new_slot;
     }
-    LOG_INFO("done... {} migrated", slots.size());
+    LOG_INFO("done... {} migrated", slots->size());
   }
 
   void CreateVersionTable() {
@@ -338,7 +336,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   std::vector<storage::ProjectedRow *> reads_;
 
   // read-write locks
-  mutable std::shared_mutex mutex_;
+  mutable std::shared_timed_mutex mutex_;
 
   // GC
   std::thread gc_thread_;
@@ -381,7 +379,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
   // Insert workload
   auto insert = [&](uint32_t id) {
     // try to get the lock because we are going to access table_
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::shared_lock<std::shared_timed_mutex> lock(mutex_);
 
     auto txn = txn_manager_.BeginTransaction();
 
@@ -416,7 +414,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
   // Read Workload
   auto read = [&](uint32_t id) {
     // try to get the lock because we are going to access table_
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::shared_lock<std::shared_timed_mutex> lock(mutex_);
     auto txn = txn_manager_.BeginTransaction();
     bool commited;
 
@@ -452,7 +450,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
   // Update workload
   auto update = [&](uint32_t id) {
     // try to get the lock because we are going to access table_
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::shared_lock<std::shared_timed_mutex> lock(mutex_);
     auto txn = txn_manager_.BeginTransaction();
 
     bool commited;
@@ -493,7 +491,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
       // sleep for 5 seconds
       std::this_thread::sleep_for(std::chrono::milliseconds(schema_txn_wake_up_interval_));
       if (stopped) break;
-      std::lock_guard<std::shared_mutex> lock(mutex_);
+      std::lock_guard<std::shared_timed_mutex> lock(mutex_);
       auto txn = txn_manager_.BeginTransaction();
       // now we have full control
 
@@ -514,7 +512,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
 
       // 2. Migrate data over
       LOG_INFO("migrating from {} to {}", schema_index - 1, schema_index);
-      MigrateTables(txn, table_, new_schemas[schema_index - 1], new_table, new_schemas[schema_index], slots);
+      MigrateTables(txn, table_, new_schemas[schema_index - 1], new_table, new_schemas[schema_index], &slots);
       // 3. change the table_ pointer
       table_ = new_table;  // potential memory leak but will do for the benchmarks
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
@@ -613,7 +611,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &stat
   auto read = [&](uint32_t id) {
     auto txn = txn_manager_.BeginTransaction();
     storage::layout_version_t my_version = GetVersion(txn, id);
-    bool aborted = false;
+    bool aborted;
     // Create a projected row buffer to reads
     // create read buffer
     // printf("reading version %d\n", !my_version);
