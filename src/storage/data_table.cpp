@@ -231,6 +231,7 @@ bool DataTable::SelectIntoBuffer(transaction::TransactionContext *const txn, con
         break;
       case DeltaRecordType::INSERT:
         visible = false;
+        printf("version_timestamp %lu, txn_start_time %lu\n", !version_ptr->Timestamp().load(), !txn->StartTime());
         break;
       case DeltaRecordType::DELETE:
         visible = true;

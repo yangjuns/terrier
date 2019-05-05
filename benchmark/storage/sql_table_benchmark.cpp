@@ -1,5 +1,8 @@
 #include <iostream>
 #include <memory>
+#include <mutex>  // For std::unique_lock
+#include <shared_mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "benchmark/benchmark.h"
@@ -20,6 +23,7 @@
 #include "util/random_test_util.h"
 #include "util/storage_test_util.h"
 #include "util/transaction_test_util.h"
+
 namespace terrier {
 
 // This benchmark simulates a key-value store inserting a large number of tuples. This provides a good baseline and
@@ -103,6 +107,57 @@ class SqlTableBenchmark : public benchmark::Fixture {
   catalog::Schema ChangeSchema(const catalog::Schema &schema, catalog::col_oid_t *oid) {
     std::bernoulli_distribution d(0.5);
     return d(generator_) ? AddColumn(schema, oid) : DropColumn(schema);
+  }
+
+  // This function generates a new schema but set the schema version number to be 0
+  catalog::Schema GetNewSchema(const catalog::Schema &schema, catalog::col_oid_t *oid) {
+    // create new schema
+    std::vector<catalog::Schema::Column> new_columns(schema.GetColumns().begin(), schema.GetColumns().end() - 1);
+    new_columns.emplace_back("", type::TypeId::BIGINT, false, (*oid)++);
+    catalog::Schema new_schema(new_columns, storage::layout_version_t(0));
+    return new_schema;
+  }
+
+  // Migrate tuples from t1 to t2. These tables have different schema. t2 is empty
+  void MigrateTables(transaction::TransactionContext *txn, storage::SqlTable *t1, catalog::Schema &t1_schema,
+                     storage::SqlTable *t2, catalog::Schema &t2_schema, std::vector<storage::TupleSlot> &slots) {
+    //    printf("txn_start_time: %lu\n", !txn->StartTime());
+    //    printf("migrating from %p to %p\n", t1, t2);
+    // create a buffer to read from t1
+    //    printf("read col_oids: ");
+    std::vector<catalog::col_oid_t> all_oids;
+    for (auto &c : t1_schema.GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+      //      printf(" %d ", !c.GetOid());
+    }
+    //    printf("\n");
+    auto t1_pair = t1->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+    byte *read_buffer = common::AllocationUtil::AllocateAligned(t1_pair.first.ProjectedRowSize());
+    storage::ProjectedRow *read = t1_pair.first.InitializeRow(read_buffer);
+
+    // create a buffer to write to t2
+    all_oids.clear();
+    //    printf("insert col_oids: ");
+    for (auto &c : t2_schema.GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+      //      printf(" %d ", !c.GetOid());
+    }
+    //    printf("\n");
+    auto t2_pair = t2->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+    byte *insert_buffer = common::AllocationUtil::AllocateAligned(t2_pair.first.ProjectedRowSize());
+    storage::ProjectedRow *insert = t2_pair.first.InitializeRow(insert_buffer);
+    for (size_t i = 0; i < slots.size(); i++) {
+      //      printf("reading slot (%p,%d) \n", slots[i].GetBlock(),slots[i].GetOffset());
+      bool succ = t1->Select(txn, slots[i], read, t1_pair.second, storage::layout_version_t(0));
+      if (!succ) LOG_INFO("buggggg {}", i);
+      // insert that into t2 with new schema
+      storage::StorageUtil::CopyProjectionIntoProjection(
+          *read, t1_pair.second, t1->GetBlockLayout(storage::layout_version_t(0)), insert, t2_pair.second);
+      storage::TupleSlot new_slot = t2->Insert(txn, *insert, storage::layout_version_t(0));
+      //      printf("new slot (%p,%d) \n", new_slot.GetBlock(),new_slot.GetOffset());
+      slots[i] = new_slot;
+    }
+    LOG_INFO("done... {} migrated", slots.size());
   }
 
   void CreateVersionTable() {
@@ -282,6 +337,9 @@ class SqlTableBenchmark : public benchmark::Fixture {
   std::vector<byte *> read_buffers_;
   std::vector<storage::ProjectedRow *> reads_;
 
+  // read-write locks
+  mutable std::shared_mutex mutex_;
+
   // GC
   std::thread gc_thread_;
   storage::GarbageCollector *gc_ = nullptr;
@@ -295,6 +353,386 @@ class SqlTableBenchmark : public benchmark::Fixture {
     }
   }
 };
+
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::State &state) {
+  // Populate table_ by inserting tuples
+  LOG_INFO("inserting tuples ...");
+
+  auto init_txn = txn_manager_.BeginTransaction();
+  std::vector<storage::TupleSlot> slots;
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
+  }
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+
+  // pre-generate new schemas
+  std::vector<catalog::Schema> new_schemas;
+  new_schemas.emplace_back(*schema_);
+  catalog::col_oid_t change_start_oid(1000);
+
+  int schema_index = 0;
+  bool stopped = false;
+  // create 4 workloads
+  // bool try_migrating = false;
+  // Insert workload
+  auto insert = [&](uint32_t id) {
+    // try to get the lock because we are going to access table_
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    auto txn = txn_manager_.BeginTransaction();
+
+    // Create a redo buffer
+    std::vector<catalog::col_oid_t> all_oids;
+    catalog::Schema *my_schema = nullptr;
+
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[schema_index]);
+    }
+    for (auto &c : my_schema->GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+    byte *redo_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *redo = pair.first.InitializeRow(redo_buffer);
+    CatalogTestUtil::PopulateRandomRow(redo, *my_schema, pair.second, &generator_);
+
+    // Insert the tuple
+    storage::TupleSlot slot = table_->Insert(txn, *redo, storage::layout_version_t(0));
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
+      slots.emplace_back(slot);
+    }
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    delete my_schema;
+    delete[] redo_buffer;
+    return true;
+  };
+
+  // Read Workload
+  auto read = [&](uint32_t id) {
+    // try to get the lock because we are going to access table_
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto txn = txn_manager_.BeginTransaction();
+    bool commited;
+
+    std::vector<catalog::col_oid_t> all_oids;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      for (auto &c : new_schemas[schema_index].GetColumns()) {
+        all_oids.emplace_back(c.GetOid());
+      }
+    }
+
+    auto pair = table_->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+    byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
+
+    // Select never fails
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
+    bool succ = table_->Select(txn, slot_pair.second, read, pair.second, storage::layout_version_t(0));
+    if (succ) {
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      commited = true;
+    } else {
+      txn_manager_.Abort(txn);
+      commited = false;
+      LOG_INFO("select failed.. Impossible")
+    }
+
+    // free memory
+    delete[] read_buffer;
+    return commited;
+  };
+
+  // Update workload
+  auto update = [&](uint32_t id) {
+    // try to get the lock because we are going to access table_
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto txn = txn_manager_.BeginTransaction();
+
+    bool commited;
+    catalog::Schema *my_schema = nullptr;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[schema_index]);
+    }
+    // Create a redo buffer
+    std::vector<catalog::col_oid_t> all_oids;
+    for (auto &c : my_schema->GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, storage::layout_version_t(0));
+    byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
+
+    CatalogTestUtil::PopulateRandomRow(update_row, *my_schema, pair.second, &generator_);
+
+    // Update the tuple
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
+    auto update_pair = table_->Update(txn, slot_pair.second, *update_row, pair.second, storage::layout_version_t(0));
+    if (update_pair.first) {
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      commited = true;
+    } else {
+      // write-write conflict
+      txn_manager_.Abort(txn);
+      commited = false;
+    }
+    delete[] update_buffer;
+    delete my_schema;
+    return commited;
+  };
+
+  auto schema_change = [&]() {
+    while (true) {
+      // sleep for 5 seconds
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      std::lock_guard<std::shared_mutex> lock(mutex_);
+      auto txn = txn_manager_.BeginTransaction();
+      // now we have full control
+
+      // Create a new schema
+
+      catalog::Schema new_schema = GetNewSchema(new_schemas[schema_index], &change_start_oid);
+
+      {
+        common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+        new_schemas.emplace_back(new_schema);
+      }
+      schema_index++;
+
+      // 1. create a new table of the schema
+
+      storage::SqlTable *new_table =
+          new storage::SqlTable(&sql_block_store_, new_schemas[schema_index], catalog::table_oid_t(123));
+
+      // 2. Migrate data over
+      LOG_INFO("migrating from {} to {}", schema_index - 1, schema_index);
+      MigrateTables(txn, table_, new_schemas[schema_index - 1], new_table, new_schemas[schema_index], slots);
+      // 3. change the table_ pointer
+      table_ = new_table;  // potential memory leak but will do for the benchmarks
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      if (stopped) break;
+    }
+  };
+  std::atomic<int> txn_run = 0;
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    StartGC(&txn_manager_);
+    auto workload = [&](uint32_t id) {
+      for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
+        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution({read, insert, update}, {id, id, id},
+                                                                           {0.7, 0.2, 0.1}, &generator_);
+        commited_txns_[id] += commited;
+        txn_run++;
+        LOG_INFO("txn_run : {}", txn_run);
+      }
+    };
+    uint64_t elapsed_ms = 0;
+    common::WorkerPool thread_pool(num_threads_, {});
+    std::thread t2(schema_change);
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+    }
+    stopped = true;
+    t2.join();
+    LOG_INFO("howmany inserts? {}", slots.size());
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+    EndGC();
+  }
+  // sum of commited
+  uint32_t sum = 0;
+  for (auto c : commited_txns_) {
+    sum += c;
+  }
+  state.SetItemsProcessed(sum);
+}
+
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
+  CreateVersionTable();
+  // Populate table_ by inserting tuples
+  LOG_INFO("inserting tuples ...");
+
+  auto init_txn = txn_manager_.BeginTransaction();
+  //  printf("------ begin insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
+  //         !init_txn->TxnId().load(), init_txn);
+  std::vector<storage::TupleSlot> slots;
+  // insert tuples into old schema
+  for (uint32_t i = 0; i < num_inserts_; ++i) {
+    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
+  }
+  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
+
+  // pre-generate new schemas
+  LOG_INFO("Pregenerating schemas ...");
+  std::vector<catalog::Schema> new_schemas;
+  new_schemas.emplace_back(*schema_);
+  catalog::col_oid_t change_start_oid(1000);
+  LOG_INFO("Finished schema size {}", new_schemas.size());
+  // create 4 workloads
+
+  // Insert workload
+  auto insert = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    storage::layout_version_t my_version = GetVersion(txn, id);
+
+    // Create a redo buffer
+    std::vector<catalog::col_oid_t> all_oids;
+    catalog::Schema *my_schema = nullptr;
+
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[!my_version]);
+    }
+    for (auto &c : my_schema->GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+    byte *redo_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *redo = pair.first.InitializeRow(redo_buffer);
+    CatalogTestUtil::PopulateRandomRow(redo, *my_schema, pair.second, &generator_);
+
+    // Insert the tuple
+    table_->Insert(txn, *redo, my_version);
+    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+    delete my_schema;
+    delete[] redo_buffer;
+    return true;
+  };
+
+  // Read Workload
+  auto read = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    storage::layout_version_t my_version = GetVersion(txn, id);
+    bool aborted = false;
+    // Create a projected row buffer to reads
+    // create read buffer
+    // printf("reading version %d\n", !my_version);
+    std::vector<catalog::col_oid_t> all_oids;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      for (auto &c : new_schemas[!my_version].GetColumns()) {
+        all_oids.emplace_back(c.GetOid());
+      }
+    }
+
+    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+    byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
+
+    // Select never fails
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
+    bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
+    if (succ) {
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
+    } else {
+      txn_manager_.Abort(txn);
+      aborted = true;
+    }
+
+    // free memory
+    delete[] read_buffer;
+    return aborted;
+  };
+
+  // Update workload
+  auto update = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    storage::layout_version_t my_version = GetVersion(txn, id);
+    bool aborted;
+    catalog::Schema *my_schema = nullptr;
+    {
+      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+      my_schema = new catalog::Schema(new_schemas[!my_version]);
+    }
+    // Create a redo buffer
+    std::vector<catalog::col_oid_t> all_oids;
+    for (auto &c : my_schema->GetColumns()) {
+      all_oids.emplace_back(c.GetOid());
+    }
+    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
+    byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
+
+    CatalogTestUtil::PopulateRandomRow(update_row, *my_schema, pair.second, &generator_);
+
+    // Update the tuple
+    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
+    auto update_pair = table_->Update(txn, slot_pair.second, *update_row, pair.second, my_version);
+    if (update_pair.first) {
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
+    } else {
+      // write-write conflict
+      txn_manager_.Abort(txn);
+      aborted = true;
+    }
+    delete[] update_buffer;
+    delete my_schema;
+    return aborted;
+  };
+
+  auto schema_change = [&](uint32_t id) {
+    auto txn = txn_manager_.BeginTransaction();
+    storage::layout_version_t my_version = GetVersion(txn, id);
+    bool aborted = false;
+    // update the version table
+    bool succ = UpdateVersionTable(txn, my_version + 1);
+    if (succ) {
+      // Create a schema to update
+      // there will be only one thread reaching here.
+      {
+        common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
+        new_schemas.emplace_back(ChangeSchema(*(new_schemas.end() - 1), &change_start_oid));
+      }
+
+      // update schema
+      TERRIER_ASSERT((!(new_schemas[!my_version + 1].GetVersion())) == (!my_version + 1),
+                     "the version of the schema should by 1 bigger");
+      table_->UpdateSchema(*(new_schemas.end() - 1));
+
+      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
+      aborted = false;
+    } else {
+      // someone else is updating the schema, abort
+      txn_manager_.Abort(txn);
+      aborted = true;
+    }
+    return aborted;
+  };
+
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    StartGC(&txn_manager_);
+    auto workload = [&](uint32_t id) {
+      for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
+        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution(
+            {read, insert, update, schema_change}, {id, id, id, id}, {0.7, 0.15, 0.1, 0.05}, &generator_);
+        commited_txns_[id] += commited;
+      }
+    };
+    uint64_t elapsed_ms = 0;
+    common::WorkerPool thread_pool(num_threads_, {});
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+    EndGC();
+  }
+  // sum of commited
+  uint32_t sum = 0;
+  for (auto c : commited_txns_) {
+    sum += c;
+  }
+  state.SetItemsProcessed(sum);
+}
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &state) {
@@ -646,188 +1084,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     delete new_table;
   }
   state.SetItemsProcessed(0);
-}
-
-// NOLINTNEXTLINE
-BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkload)(benchmark::State &state) {
-  CreateVersionTable();
-  // Populate table_ by inserting tuples
-  LOG_INFO("inserting tuples ...");
-
-  auto init_txn = txn_manager_.BeginTransaction();
-  //  printf("------ begin insert txn (start_ts: %lu, id : %lu, addr: %p)\n", !init_txn->StartTime(),
-  //         !init_txn->TxnId().load(), init_txn);
-  std::vector<storage::TupleSlot> slots;
-  // insert tuples into old schema
-  for (uint32_t i = 0; i < num_inserts_; ++i) {
-    slots.emplace_back(table_->Insert(init_txn, *redo_, storage::layout_version_t(0)));
-  }
-  txn_manager_.Commit(init_txn, TestCallbacks::EmptyCallback, nullptr);
-
-  // pre-generate new schemas
-  LOG_INFO("Pregenerating schemas ...");
-  std::vector<catalog::Schema> new_schemas;
-  new_schemas.emplace_back(*schema_);
-  catalog::col_oid_t change_start_oid(1000);
-  LOG_INFO("Finished schema size {}", new_schemas.size());
-  // create 4 workloads
-
-  // Insert workload
-  auto insert = [&](uint32_t id) {
-    auto txn = txn_manager_.BeginTransaction();
-    storage::layout_version_t my_version = GetVersion(txn, id);
-
-    // Create a redo buffer
-    std::vector<catalog::col_oid_t> all_oids;
-    catalog::Schema *my_schema = nullptr;
-
-    {
-      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
-      my_schema = new catalog::Schema(new_schemas[!my_version]);
-    }
-    for (auto &c : my_schema->GetColumns()) {
-      all_oids.emplace_back(c.GetOid());
-    }
-    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
-    byte *redo_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
-    storage::ProjectedRow *redo = pair.first.InitializeRow(redo_buffer);
-    CatalogTestUtil::PopulateRandomRow(redo, *my_schema, pair.second, &generator_);
-
-    // Insert the tuple
-    table_->Insert(txn, *redo, my_version);
-    txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-    delete my_schema;
-    delete[] redo_buffer;
-    return true;
-  };
-
-  // Read Workload
-  auto read = [&](uint32_t id) {
-    auto txn = txn_manager_.BeginTransaction();
-    storage::layout_version_t my_version = GetVersion(txn, id);
-    bool aborted = false;
-    // Create a projected row buffer to reads
-    // create read buffer
-    // printf("reading version %d\n", !my_version);
-    std::vector<catalog::col_oid_t> all_oids;
-    {
-      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
-      for (auto &c : new_schemas[!my_version].GetColumns()) {
-        all_oids.emplace_back(c.GetOid());
-      }
-    }
-
-    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
-    byte *read_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
-    storage::ProjectedRow *read = pair.first.InitializeRow(read_buffer);
-
-    // Select never fails
-    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
-    bool succ = table_->Select(txn, slot_pair.second, read, pair.second, my_version);
-    if (succ) {
-      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-      aborted = false;
-    } else {
-      txn_manager_.Abort(txn);
-      aborted = true;
-    }
-
-    // free memory
-    delete[] read_buffer;
-    return aborted;
-  };
-
-  // Update workload
-  auto update = [&](uint32_t id) {
-    auto txn = txn_manager_.BeginTransaction();
-    storage::layout_version_t my_version = GetVersion(txn, id);
-    bool aborted;
-    catalog::Schema *my_schema = nullptr;
-    {
-      common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
-      my_schema = new catalog::Schema(new_schemas[!my_version]);
-    }
-    // Create a redo buffer
-    std::vector<catalog::col_oid_t> all_oids;
-    for (auto &c : my_schema->GetColumns()) {
-      all_oids.emplace_back(c.GetOid());
-    }
-    auto pair = table_->InitializerForProjectedRow(all_oids, my_version);
-    byte *update_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
-    storage::ProjectedRow *update_row = pair.first.InitializeRow(update_buffer);
-
-    CatalogTestUtil::PopulateRandomRow(update_row, *my_schema, pair.second, &generator_);
-
-    // Update the tuple
-    auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
-    auto update_pair = table_->Update(txn, slot_pair.second, *update_row, pair.second, my_version);
-    if (update_pair.first) {
-      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-      aborted = false;
-    } else {
-      // write-write conflict
-      txn_manager_.Abort(txn);
-      aborted = true;
-    }
-    delete[] update_buffer;
-    delete my_schema;
-    return aborted;
-  };
-
-  auto schema_change = [&](uint32_t id) {
-    auto txn = txn_manager_.BeginTransaction();
-    storage::layout_version_t my_version = GetVersion(txn, id);
-    bool aborted = false;
-    // update the version table
-    bool succ = UpdateVersionTable(txn, my_version + 1);
-    if (succ) {
-      // Create a schema to update
-      // there will be only one thread reaching here.
-      {
-        common::SpinLatch::ScopedSpinLatch guard(&schema_latch_);
-        new_schemas.emplace_back(ChangeSchema(*(new_schemas.end() - 1), &change_start_oid));
-      }
-
-      // update schema
-      TERRIER_ASSERT((!(new_schemas[!my_version + 1].GetVersion())) == (!my_version + 1),
-                     "the version of the schema should by 1 bigger");
-      table_->UpdateSchema(*(new_schemas.end() - 1));
-
-      txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-      aborted = false;
-    } else {
-      // someone else is updating the schema, abort
-      txn_manager_.Abort(txn);
-      aborted = true;
-    }
-    return aborted;
-  };
-
-  // NOLINTNEXTLINE
-  for (auto _ : state) {
-    StartGC(&txn_manager_);
-    auto workload = [&](uint32_t id) {
-      for (uint32_t i = 0; i < num_txns_ / num_threads_; ++i) {
-        uint32_t commited = RandomTestUtil::InvokeWorkloadWithDistribution(
-            {read, insert, update, schema_change}, {id, id, id, id}, {0.7, 0.15, 0.1, 0.05}, &generator_);
-        commited_txns_[id] += commited;
-      }
-    };
-    uint64_t elapsed_ms = 0;
-    common::WorkerPool thread_pool(num_threads_, {});
-    {
-      common::ScopedTimer timer(&elapsed_ms);
-      MultiThreadTestUtil::RunThreadsUntilFinish(&thread_pool, num_threads_, workload);
-    }
-    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
-    EndGC();
-  }
-  // sum of commited
-  uint32_t sum = 0;
-  for (auto c : commited_txns_) {
-    sum += c;
-  }
-  state.SetItemsProcessed(sum);
 }
 
 // Insert the num_inserts_ of tuples into a SqlTable in a single thread
@@ -1513,8 +1769,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmarks for version match
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
@@ -1535,9 +1791,9 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMil
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
@@ -1553,6 +1809,11 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmar
 //    ->Unit(benchmark::kMillisecond)
 //    ->UseManualTime()
 //    ->Iterations(4);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
+    ->Unit(benchmark::kMillisecond)
+    ->UseManualTime()
+    ->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //

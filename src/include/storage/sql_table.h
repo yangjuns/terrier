@@ -322,6 +322,9 @@ class SqlTable {
     return {initializer, projection_map};
   }
 
+  // TODO(yangjuns) : function for my thesis. Remove later
+  storage::BlockLayout GetBlockLayout(layout_version_t version_num) { return tables_.Find(version_num)->second.layout; }
+
  private:
   // cache for common case (no schema change)
   DataTable *first_dt_ = nullptr;
