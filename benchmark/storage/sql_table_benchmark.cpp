@@ -490,6 +490,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)(benchmark::Sta
     while (true) {
       // sleep for 5 seconds
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      if (stopped) break;
       std::lock_guard<std::shared_mutex> lock(mutex_);
       auto txn = txn_manager_.BeginTransaction();
       // now we have full control
