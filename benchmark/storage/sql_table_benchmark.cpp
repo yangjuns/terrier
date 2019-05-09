@@ -1805,7 +1805,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 }
 
 //// Benchmarks for common cases
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
 //
@@ -1816,10 +1816,10 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisec
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 //
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmarks for version match
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionInsert)->Unit(benchmark::kMillisecond)->UseManualTime();
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionInsert)->Unit(benchmark::kMillisecond)->UseManualTime();
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
 //
@@ -1839,9 +1839,9 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionInsert)->Unit(benchmark::kMi
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
-//
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
+
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
