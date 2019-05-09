@@ -976,6 +976,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
   int committed_txns_count = 0;
   // Throughput Compute Thread
   auto compute = [&]() {
+    // let the system warm up for 10 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(10));
     // checks throughput every second
     int prev = 0;
     int seconds = 1;
@@ -1046,6 +1048,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
   };
 
   auto schema_change = [&]() {
+    // let the system warm up for 10 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(10));
     // sleep for 5 seconds
     std::this_thread::sleep_for(std::chrono::seconds(10));
 
@@ -1069,7 +1073,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(60));
+    std::this_thread::sleep_for(std::chrono::seconds(130));
     // stop all threads
     finished = true;
     t1.join();
