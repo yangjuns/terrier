@@ -1112,6 +1112,44 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, SimpleInsert)(benchmark::State &state) {
   state.SetItemsProcessed(state.iterations() * num_inserts_);
 }
 
+// Insert the num_inserts_ of tuples into a SqlTable of two versions in a single thread
+// NOLINTNEXTLINE
+BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionInsert)(benchmark::State &state) {
+  // NOLINTNEXTLINE
+  for (auto _ : state) {
+    // Create a sql_table
+    storage::SqlTable table(&sql_block_store_, *schema_, catalog::table_oid_t(0));
+    // We can use dummy timestamps here since we're not invoking concurrency control
+    transaction::TransactionContext txn(transaction::timestamp_t(0), transaction::timestamp_t(0), &buffer_pool_,
+                                        LOGGING_DISABLED);
+
+    // create new schema
+    catalog::col_oid_t col_oid(column_num_);
+    std::vector<catalog::Schema::Column> new_columns(columns_.begin(), columns_.end() - 1);
+    new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
+    catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
+    table.UpdateSchema(new_schema);
+
+    // create a new insert buffer
+    std::vector<catalog::col_oid_t> all_col_oids(new_columns.size());
+    for (size_t i = 0; i < new_columns.size(); i++) all_col_oids[i] = new_columns[i].GetOid();
+    auto pair = table.InitializerForProjectedRow(all_col_oids, storage::layout_version_t(1));
+    byte *insert_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
+    storage::ProjectedRow *insert_pr = pair.first.InitializeRow(insert_buffer);
+    CatalogTestUtil::PopulateRandomRow(insert_pr, new_schema, pair.second, &generator_);
+
+    uint64_t elapsed_ms;
+    {
+      common::ScopedTimer timer(&elapsed_ms);
+      for (uint32_t i = 0; i < num_inserts_; ++i) {
+        table.Insert(&txn, *insert_pr, storage::layout_version_t(1));
+      }
+    }
+    state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+  }
+  state.SetItemsProcessed(state.iterations() * num_inserts_);
+}
+
 // Insert the num_inserts_ of tuples into a SqlTable concurrently
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ConcurrentInsert)(benchmark::State &state) {
@@ -1767,8 +1805,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 }
 
 //// Benchmarks for common cases
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
-//
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SimpleInsert)->Unit(benchmark::kMillisecond);
+
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionRandomRead)->Unit(benchmark::kMillisecond);
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionUpdate)->Unit(benchmark::kMillisecond);
@@ -1781,6 +1819,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmarks for version match
+BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionInsert)->Unit(benchmark::kMillisecond)->UseManualTime();
+
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchRandomRead)->Unit(benchmark::kMillisecond);
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchUpdate)->Unit(benchmark::kMillisecond);
@@ -1813,15 +1853,15 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
-    ->Unit(benchmark::kMillisecond)
-    ->UseManualTime()
-    ->Iterations(1);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
-    ->Unit(benchmark::kMillisecond)
-    ->UseManualTime()
-    ->Iterations(1);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkload)
+//    ->Unit(benchmark::kMillisecond)
+//    ->UseManualTime()
+//    ->Iterations(1);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentWorkloadBlocking)
+//    ->Unit(benchmark::kMillisecond)
+//    ->UseManualTime()
+//    ->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ConcurrentInsert)->Unit(benchmark::kMillisecond)->UseRealTime();
 //
