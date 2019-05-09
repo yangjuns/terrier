@@ -907,7 +907,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       }
 
       // Update never fails
-      auto slot_pair = GetHotSpotSlot(slots, 1, 1);
+      auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
         committed_txns_count++;
