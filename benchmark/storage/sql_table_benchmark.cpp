@@ -155,7 +155,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
       //      printf("new slot (%p,%d) \n", new_slot.GetBlock(),new_slot.GetOffset());
       (*slots)[i] = new_slot;
     }
-    LOG_INFO("done... {} migrated", slots->size());
+    // LOG_INFO("done... {} migrated", slots->size());
   }
 
   void CreateVersionTable() {
@@ -856,15 +856,30 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
   catalog::Schema new_schema(new_columns, storage::layout_version_t(1));
 
   // throughput vector
-  std::vector<double> throughput;
   uint32_t version = 0;
 
   bool finished = false;
 
+  int committed_txns_count = 0;
+
+  // Throughput Compute Thread
+  auto compute = [&]() {
+    // let the system warm up for 10 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    // checks throughput every second
+    int prev = committed_txns_count;
+    int seconds = 1;
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      int cur = committed_txns_count;
+      printf("(%d, %d)\n", seconds, cur - prev);
+      prev = cur;
+      seconds++;
+      if (finished) break;
+    }
+  };
   // Update Thread
   auto update = [&]() {
-    uint64_t committed_txns_count = 0;
-    auto start = std::chrono::high_resolution_clock::now();
     while (true) {
       auto txn = txn_manager_.BeginTransaction();
       // get my version
@@ -910,17 +925,13 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       }
       // free memory
       delete[] update_buffer;
-      std::chrono::duration<double, std::milli> diff = std::chrono::high_resolution_clock::now() - start;
-      if (diff.count() > 1000) {
-        throughput.emplace_back(static_cast<double>(committed_txns_count) / (diff.count() / 1000));
-        committed_txns_count = 0;
-        start = std::chrono::high_resolution_clock::now();
-      }
       if (finished) break;
     }
   };
 
   auto schema_change = [&]() {
+    // let the system warm up for 10 seconds
+    std::this_thread::sleep_for(std::chrono::seconds(10));
     // sleep for 5 seconds
     std::this_thread::sleep_for(std::chrono::seconds(10));
 
@@ -936,16 +947,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     StartGC(&txn_manager_);
     std::thread t1(update);
     std::thread t2(schema_change);
+    std::thread t3(compute);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(60));
+    std::this_thread::sleep_for(std::chrono::seconds(130));
     // stop all threads
     finished = true;
     t1.join();
     t2.join();
-    // print throughput
-    for (size_t i = 0; i < throughput.size(); i++) {
-      printf("(%zu, %d)\n", i + 1, static_cast<int>(throughput[i]));
-    }
+    t3.join();
     EndGC();
   }
   state.SetItemsProcessed(0);
@@ -979,7 +988,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     // let the system warm up for 10 seconds
     std::this_thread::sleep_for(std::chrono::seconds(10));
     // checks throughput every second
-    int prev = 0;
+    int prev = committed_txns_count;
     int seconds = 1;
     while (true) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -1842,9 +1851,9 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
 //
 //// Benchmark for concurrent workload
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
