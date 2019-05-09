@@ -1079,14 +1079,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
   for (auto _ : state) {
     StartGC(&txn_manager_);
     std::thread t1(update);
-    std::thread t2(schema_change);
+    // std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
     std::this_thread::sleep_for(std::chrono::seconds(130));
     // stop all threads
     finished = true;
     t1.join();
-    t2.join();
+    // t2.join();
     t3.join();
     //    // print throughput
     //    for (size_t i = 0; i < throughput.size(); i++) {
