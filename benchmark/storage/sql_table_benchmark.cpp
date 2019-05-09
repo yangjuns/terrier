@@ -318,7 +318,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Schema
-  const uint32_t column_num_ = 2;
+  const uint32_t column_num_ = 10;
   std::vector<catalog::Schema::Column> columns_;
   catalog::Schema *schema_ = nullptr;
   catalog::Schema *version_schema_ = nullptr;
@@ -967,19 +967,29 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
   new_columns.emplace_back("", type::TypeId::BIGINT, false, col_oid);
   catalog::Schema new_schema(new_columns, storage::layout_version_t(0));
 
-  // throughput vector
-  std::vector<double> throughput;
-
   bool finished = false;
   bool new_version = false;
   common::SpinLatch update_latch;
 
   // new table
   storage::SqlTable *new_table = nullptr;
+  int committed_txns_count = 0;
+  // Throughput Compute Thread
+  auto compute = [&]() {
+    // checks throughput every second
+    int prev = 0;
+    int seconds = 1;
+    while (true) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      int cur = committed_txns_count;
+      printf("(%d, %d)\n", seconds, cur - prev);
+      prev = cur;
+      seconds++;
+      if (finished) break;
+    }
+  };
   // Update Thread
   auto update = [&]() {
-    uint64_t committed_txns_count = 0;
-    auto start = std::chrono::high_resolution_clock::now();
     while (true) {
       {
         common::SpinLatch::ScopedSpinLatch update_guard(&update_latch);
@@ -1030,12 +1040,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
         }
         // free memory
         delete[] update_buffer;
-        std::chrono::duration<double, std::milli> diff = std::chrono::high_resolution_clock::now() - start;
-        if (diff.count() > 1000) {
-          throughput.emplace_back(static_cast<double>(committed_txns_count) / (diff.count() / 1000));
-          committed_txns_count = 0;
-          start = std::chrono::high_resolution_clock::now();
-        }
         if (finished) break;
       }
     }
@@ -1063,16 +1067,18 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     StartGC(&txn_manager_);
     std::thread t1(update);
     std::thread t2(schema_change);
+    std::thread t3(compute);
     // sleep for 30 seconds
     std::this_thread::sleep_for(std::chrono::seconds(60));
     // stop all threads
     finished = true;
     t1.join();
     t2.join();
-    // print throughput
-    for (size_t i = 0; i < throughput.size(); i++) {
-      printf("(%zu, %d)\n", i + 1, static_cast<int>(throughput[i]));
-    }
+    t3.join();
+    //    // print throughput
+    //    for (size_t i = 0; i < throughput.size(); i++) {
+    //      printf("(%zu, %d)\n", i + 1, static_cast<int>(throughput[i]));
+    //    }
     EndGC();
     delete new_table;
   }
