@@ -969,7 +969,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
 
   // throughput vector
   std::vector<double> throughput;
-  uint32_t version = 0;
 
   bool finished = false;
   bool new_version = false;
@@ -986,7 +985,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
         common::SpinLatch::ScopedSpinLatch update_guard(&update_latch);
         auto txn = txn_manager_.BeginTransaction();
         // get my version
-        storage::layout_version_t my_version(version);
+        storage::layout_version_t my_version(0);
 
         // get correct columns
         std::vector<catalog::col_oid_t> all_oids;
@@ -1016,7 +1015,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
         }
 
         // Update never fails
-        auto slot_pair = GetHotSpotSlot(slots, 1, 1);
+        auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
         auto result = my_table->Update(txn, slot_pair.second, *update, pair.second, my_version);
         if (result.first) {
           committed_txns_count++;
@@ -1049,26 +1048,12 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     // change the schema
     {
       common::SpinLatch::ScopedSpinLatch update_guard(&update_latch);
-
+      auto txn = txn_manager_.BeginTransaction();
       // create new table
       new_table = new storage::SqlTable(&sql_block_store_, new_schema, catalog::table_oid_t(456));
 
-      std::vector<catalog::col_oid_t> all_col_oids;
-      for (auto &col : new_schema.GetColumns()) all_col_oids.emplace_back(col.GetOid());
-      auto pair = new_table->InitializerForProjectedRow(all_col_oids, storage::layout_version_t(0));
-
-      // generate a random redo ProjectedRow to Insert
-      byte *insert_buffer = common::AllocationUtil::AllocateAligned(pair.first.ProjectedRowSize());
-      storage::ProjectedRow *insert_pr = pair.first.InitializeRow(insert_buffer);
-
-      // insert num_insert tuples to the new table
-      auto txn = txn_manager_.BeginTransaction();
-      for (uint32_t i = 0; i < num_inserts_; i++) {
-        CatalogTestUtil::PopulateRandomRow(insert_pr, new_schema, pair.second, &generator_);
-        slots[i] = new_table->Insert(txn, *insert_pr, storage::layout_version_t(0));
-      }
+      MigrateTables(txn, table_, *schema_, new_table, new_schema, &slots);
       txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
-      delete[] insert_buffer;
       new_version = true;
     }
   };
@@ -1816,7 +1801,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 //
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmarks for version match
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionInsert)->Unit(benchmark::kMillisecond)->UseManualTime();
@@ -1839,9 +1824,9 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMil
 //
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchSequentialRead)->Unit(benchmark::kMillisecond);
 
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
-
-BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMatchScan)->Unit(benchmark::kMillisecond);
+//
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
@@ -1849,7 +1834,7 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, MultiVersionMismatchScan)->Unit(benchmar
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
