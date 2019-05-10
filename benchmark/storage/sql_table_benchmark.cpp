@@ -318,7 +318,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Schema
-  const uint32_t column_num_ = 2;
+  const uint32_t column_num_ = 10;
   std::vector<catalog::Schema::Column> columns_;
   catalog::Schema *schema_ = nullptr;
   catalog::Schema *version_schema_ = nullptr;
@@ -861,7 +861,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
   bool finished = false;
 
   int committed_txns_count = 0;
-
+  int migration_count = 0;
   // Throughput Compute Thread
   auto compute = [&]() {
     // let the system warm up for 10 seconds
@@ -875,9 +875,11 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       printf("(%d, %d)\n", seconds, cur - prev);
       prev = cur;
       seconds++;
+      printf("migration count: %d\n", migration_count);
       if (finished) break;
     }
   };
+
   // Update Thread
   auto update = [&]() {
     while (true) {
@@ -914,6 +916,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
         // check if the tuple slot got updated
         if (result.second != slot_pair.second) {
           {
+            migration_count++;
             common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
             slots[slot_pair.first] = result.second;
           }
@@ -1818,7 +1821,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark,
 // SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 //
-BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
@@ -1850,8 +1853,8 @@ BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(bench
 //// Benchmark for concurrent workload
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
 //
-//// Benchmark for concurrent workload
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+// Benchmark for concurrent workload
+BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
