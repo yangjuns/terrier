@@ -1818,8 +1818,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark,
 // SingleVersionSequentialDelete)->Unit(benchmark::kMillisecond)->UseManualTime();
 //
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
-//
+BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionSequentialRead)->Unit(benchmark::kMillisecond);
+
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, SingleVersionScan)->Unit(benchmark::kMillisecond);
 
 //// Benchmarks for version match
@@ -1851,7 +1851,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
 //
 //// Benchmark for concurrent workload
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
