@@ -318,7 +318,7 @@ class SqlTableBenchmark : public benchmark::Fixture {
   transaction::TransactionManager txn_manager_ = {&buffer_pool_, true, LOGGING_DISABLED};
 
   // Schema
-  const uint32_t column_num_ = 10;
+  const uint32_t column_num_ = 2;
   std::vector<catalog::Schema::Column> columns_;
   catalog::Schema *schema_ = nullptr;
   catalog::Schema *version_schema_ = nullptr;
