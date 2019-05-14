@@ -875,7 +875,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       printf("(%d, %d)\n", seconds, cur - prev);
       prev = cur;
       seconds++;
-      printf("migration count: %d\n", migration_count);
       if (finished) break;
     }
   };
@@ -958,6 +957,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     t1.join();
     t2.join();
     t3.join();
+    printf("migration count: %d\n", migration_count);
     EndGC();
   }
   state.SetItemsProcessed(0);
