@@ -848,6 +848,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeSelect)(benchmark::State &
 
 // NOLINTNEXTLINE
 BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &state) {
+  srand(static_cast<unsigned int>(time(NULL)));
   auto init_txn = txn_manager_.BeginTransaction();
   std::vector<storage::TupleSlot> slots;
   // insert tuples into old schema
@@ -864,9 +865,10 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
 
   // throughput vector
   uint32_t version = 0;
-
+  common::SpinLatch set_latch_;
+  std::uniform_int_distribution<int> distribution;
   bool finished = false;
-
+  std::unordered_map<int,int> map;
   int committed_txns_count = 0;
   int migration_count = 0;
   // Throughput Compute Thread
@@ -877,16 +879,17 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     int prev = committed_txns_count;
     int seconds = 1;
     while (true) {
+      distribution.reset();
       std::this_thread::sleep_for(std::chrono::seconds(1));
       int cur = committed_txns_count;
       printf("(%d, %d)\n", seconds, cur - prev);
       prev = cur;
       seconds++;
-      printf("migration count: %d\n", migration_count);
       if (finished) break;
     }
   };
 
+  std::unordered_set<int> updated_index;
   // Update Thread
   auto update = [&]() {
     while (true) {
@@ -916,15 +919,21 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       }
 
       // Update never fails
-      auto slot_pair = GetHotSpotSlot(slots, 0, 0);
+      int index = rand() % num_inserts_;
+      std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
+      {
+        common::SpinLatch::ScopedSpinLatch guard(&set_latch_);
+        map[index]++;
+      }
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
         committed_txns_count++;
         // check if the tuple slot got updated
         if (result.second != slot_pair.second) {
+          updated_index.insert(slot_pair.first);
           {
-            migration_count++;
             common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
+            migration_count++;
             slots[slot_pair.first] = result.second;
           }
         }
