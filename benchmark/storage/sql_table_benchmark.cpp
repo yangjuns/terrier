@@ -244,6 +244,13 @@ class SqlTableBenchmark : public benchmark::Fixture {
    */
   std::pair<uint32_t, storage::TupleSlot> GetHotSpotSlot(const std::vector<storage::TupleSlot> &slots, double hs_ratio,
                                                          double hs_prob) {
+    if (hs_ratio == 0) {
+      // random
+      // LOG_INFO("slots size: {}, num_inserts: {}", slots.size(), num_inserts_);
+      std::uniform_int_distribution<> int_dist(0, static_cast<int>(slots.size() - 1));
+      int index = int_dist(generator_);
+      return {index, slots[index]};
+    }
     uint32_t index = 0;
     auto hot_spot_range = static_cast<uint32_t>(num_inserts_ * hs_ratio);
     std::uniform_real_distribution<> real_dist(0, 1);
@@ -909,7 +916,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       }
 
       // Update never fails
-      auto slot_pair = GetHotSpotSlot(slots, 1, 1);
+      auto slot_pair = GetHotSpotSlot(slots, 0, 0);
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
         committed_txns_count++;
@@ -1083,14 +1090,14 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
   for (auto _ : state) {
     StartGC(&txn_manager_);
     std::thread t1(update);
-    // std::thread t2(schema_change);
+    std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
     std::this_thread::sleep_for(std::chrono::seconds(310));
     // stop all threads
     finished = true;
     t1.join();
-    // t2.join();
+    t2.join();
     t3.join();
     //    // print throughput
     //    for (size_t i = 0; i < throughput.size(); i++) {
