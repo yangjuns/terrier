@@ -1085,7 +1085,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
     std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(130));
+    std::this_thread::sleep_for(std::chrono::seconds(310));
     // stop all threads
     finished = true;
     t1.join();
@@ -1854,9 +1854,9 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, MultiVersionMismatchScan)(benchmark::State
 // BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeSelect)->Unit(benchmark::kMillisecond)->Iterations(1);
 //
 // Benchmark for concurrent workload
-BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+// BENCHMARK_REGISTER_F(SqlTableBenchmark, ThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
-// BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
+BENCHMARK_REGISTER_F(SqlTableBenchmark, BlockThroughputChangeUpdate)->Unit(benchmark::kMillisecond)->Iterations(1);
 
 // Limit the number of iterations to 4 because google benchmark can run multiple iterations. ATM sql table doesn't
 // have implemented compaction so it will blow up memory
