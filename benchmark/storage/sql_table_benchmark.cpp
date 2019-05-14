@@ -952,7 +952,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(130));
+    std::this_thread::sleep_for(std::chrono::seconds(310));
     // stop all threads
     finished = true;
     t1.join();
