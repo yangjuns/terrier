@@ -917,16 +917,16 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
 
       int index;
       // random
-      index = rand() % num_inserts_;
+      //      index = rand() % num_inserts_;
 
       // 5% hot spot
-      // int hot_spot_size = static_cast<int>(num_inserts_ *0.05);
-      //      if(rand() % 100 < 80){
-      //        // hot spot
-      //        index = rand() % hot_spot_size;
-      //      }else{
-      //        index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
-      //      }
+      int hot_spot_size = static_cast<int>(num_inserts_ * 0.05);
+      if (rand() % 100 < 80) {
+        // hot spot
+        index = rand() % hot_spot_size;
+      } else {
+        index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
+      }
       std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
@@ -1070,7 +1070,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
         } else {
           index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
         }
-
 
         std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
         auto result = my_table->Update(txn, slot_pair.second, *update, pair.second, my_version);
