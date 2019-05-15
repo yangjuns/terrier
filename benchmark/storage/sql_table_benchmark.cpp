@@ -865,10 +865,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
 
   // throughput vector
   uint32_t version = 0;
-  common::SpinLatch set_latch_;
-  std::uniform_int_distribution<int> distribution;
   bool finished = false;
-  std::unordered_map<int,int> map;
+  std::unordered_map<int, int> map;
   int committed_txns_count = 0;
   int migration_count = 0;
   // Throughput Compute Thread
@@ -879,7 +877,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     int prev = committed_txns_count;
     int seconds = 1;
     while (true) {
-      distribution.reset();
       std::this_thread::sleep_for(std::chrono::seconds(1));
       int cur = committed_txns_count;
       printf("(%d, %d)\n", seconds, cur - prev);
@@ -889,7 +886,8 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     }
   };
 
-  std::unordered_set<int> updated_index;
+  // std::unordered_set<int> updated_index;
+  // int hot_spot_size = static_cast<int>(num_inserts_ *0.05);
   // Update Thread
   auto update = [&]() {
     while (true) {
@@ -918,24 +916,33 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
         CatalogTestUtil::PopulateRandomRow(update, new_schema, pair.second, &generator_);
       }
 
-      // Update never fails
-      int index = rand() % num_inserts_;
+      int index;
+      // random
+      index = rand() % num_inserts_;
+
+      // 5% hot spot
+      //      if(rand() % 100 < 80){
+      //        // hot spot
+      //        index = rand() % hot_spot_size;
+      //      }else{
+      //        index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
+      //      }
       std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
-      {
-        common::SpinLatch::ScopedSpinLatch guard(&set_latch_);
-        map[index]++;
-      }
+      //      {
+      //        common::SpinLatch::ScopedSpinLatch guard(&set_latch_);
+      //        map[index]++;
+      //      }
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
         committed_txns_count++;
         // check if the tuple slot got updated
         if (result.second != slot_pair.second) {
-          updated_index.insert(slot_pair.first);
-          {
-            common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
-            migration_count++;
-            slots[slot_pair.first] = result.second;
-          }
+          //          updated_index.insert(slot_pair.first);
+          //          {
+          //            common::SpinLatch::ScopedSpinLatch guard(&slot_latch_);
+          migration_count++;
+          slots[slot_pair.first] = result.second;
+          //          }
         }
         txn_manager_.Commit(txn, TestCallbacks::EmptyCallback, nullptr);
       } else {
@@ -968,7 +975,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
     std::thread t2(schema_change);
     std::thread t3(compute);
     // sleep for 30 seconds
-    std::this_thread::sleep_for(std::chrono::seconds(610));
+    std::this_thread::sleep_for(std::chrono::seconds(310));
     // stop all threads
     finished = true;
     t1.join();
