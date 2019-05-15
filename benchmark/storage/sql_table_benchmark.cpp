@@ -887,7 +887,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
   };
 
   // std::unordered_set<int> updated_index;
-  // int hot_spot_size = static_cast<int>(num_inserts_ *0.05);
   // Update Thread
   auto update = [&]() {
     while (true) {
@@ -921,6 +920,7 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       index = rand() % num_inserts_;
 
       // 5% hot spot
+      // int hot_spot_size = static_cast<int>(num_inserts_ *0.05);
       //      if(rand() % 100 < 80){
       //        // hot spot
       //        index = rand() % hot_spot_size;
@@ -928,10 +928,6 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, ThroughputChangeUpdate)(benchmark::State &
       //        index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
       //      }
       std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
-      //      {
-      //        common::SpinLatch::ScopedSpinLatch guard(&set_latch_);
-      //        map[index]++;
-      //      }
       auto result = table_->Update(txn, slot_pair.second, *update, pair.second, my_version);
       if (result.first) {
         committed_txns_count++;
@@ -1062,8 +1058,21 @@ BENCHMARK_DEFINE_F(SqlTableBenchmark, BlockThroughputChangeUpdate)(benchmark::St
           CatalogTestUtil::PopulateRandomRow(update, new_schema, pair.second, &generator_);
         }
 
-        // Update never fails
-        auto slot_pair = GetHotSpotSlot(slots, 0.05, 0.8);
+        // Get index....
+        int index;
+        // random
+        // index = rand() % num_inserts_;
+        // 5% hot spot
+        int hot_spot_size = static_cast<int>(num_inserts_ * 0.05);
+        if (rand() % 100 < 80) {
+          // hot spot
+          index = rand() % hot_spot_size;
+        } else {
+          index = (rand() % (num_inserts_ - hot_spot_size)) + hot_spot_size;
+        }
+
+
+        std::pair<int, storage::TupleSlot> slot_pair = {index, slots[index]};
         auto result = my_table->Update(txn, slot_pair.second, *update, pair.second, my_version);
         if (result.first) {
           committed_txns_count++;
